@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -29,6 +31,29 @@ class OrderIn(BaseModel):
 
 class DeployIn(BaseModel):
     uid: str
+
+
+class LoginIn(BaseModel):
+    password: str
+
+
+LOGIN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>HIVEMIND login</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#090b0e;color:#e7eaf0;font:14px system-ui,sans-serif;padding:16px}
+form{box-sizing:border-box;background:#11151b;border:1px solid #2a3441;border-radius:14px;padding:28px;width:100%;max-width:340px}
+h1{font-size:16px;letter-spacing:.25em;margin:0 0 18px;color:#f5b544}
+input{width:100%;box-sizing:border-box;padding:11px 12px;border-radius:9px;border:1px solid #2a3441;background:#0d1014;color:#e7eaf0;font-size:14px}
+button{margin-top:12px;width:100%;padding:11px;border:none;border-radius:9px;background:#f5b544;color:#1b1305;font-weight:600;font-size:14px;cursor:pointer}
+p{color:#ff5d6c;min-height:18px;margin:10px 0 0;font-size:13px}
+</style></head><body>
+<form id="f"><h1>&#11042; HIVEMIND</h1><input id="p" type="password" placeholder="Dashboard password" autofocus>
+<button>Enter</button><p id="e"></p></form>
+<script>
+document.getElementById('f').onsubmit=async(ev)=>{ev.preventDefault();
+const r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('p').value})});
+if(r.ok){location.href='/';}else{document.getElementById('e').textContent='Wrong password';}};
+</script></body></html>"""
 
 
 class SpawnIn(BaseModel):
@@ -85,6 +110,37 @@ def create_app(cfg: Config) -> FastAPI:
 
     app = FastAPI(title="HIVEMIND", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    # optional password protection (set DASHBOARD_PASSWORD whenever the dashboard is reachable from the internet)
+    password = cfg.dashboard_password
+    token = hmac.new((password or "").encode(), b"hivemind-session-v1", hashlib.sha256).hexdigest()
+
+    def authed(cookies) -> bool:
+        return not password or hmac.compare_digest(cookies.get("hive_auth", ""), token)
+
+    @app.middleware("http")
+    async def require_login(request: Request, call_next):
+        if password and request.url.path != "/login" and not authed(request.cookies):
+            if request.url.path.startswith("/api/") or request.url.path.startswith("/static/"):
+                return JSONResponse({"detail": "login required"}, status_code=401)
+            return RedirectResponse("/login")
+        return await call_next(request)
+
+    @app.get("/login")
+    async def login_page():
+        if not password:
+            return RedirectResponse("/")
+        return HTMLResponse(LOGIN_PAGE)
+
+    @app.post("/login")
+    async def login(body: LoginIn, request: Request):
+        if not password or not hmac.compare_digest(body.password, password):
+            await asyncio.sleep(0.5)
+            raise HTTPException(401, "wrong password")
+        resp = JSONResponse({"ok": True})
+        secure = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+        resp.set_cookie("hive_auth", token, max_age=60 * 60 * 24 * 30, httponly=True, samesite="lax", secure=secure)
+        return resp
 
     def need_hive() -> Hive:
         hive = state["hive"]
@@ -181,6 +237,9 @@ def create_app(cfg: Config) -> FastAPI:
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket):
+        if not authed(websocket.cookies):
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         q = None
         try:

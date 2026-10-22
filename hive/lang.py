@@ -256,7 +256,7 @@ def _as_bool(x, n: int) -> np.ndarray:
 class Engine:
     """Evaluates expressions against one Dataset with an LRU cache of sub-expressions."""
 
-    def __init__(self, ds: Dataset, cache_size: int = 512):
+    def __init__(self, ds: Dataset, cache_size: int = 192):
         self.ds = ds
         self.n = ds.n
         self.cache: OrderedDict[str, np.ndarray] = OrderedDict()

@@ -78,6 +78,7 @@ class Config:
     paper_scale: float = 1.0
 
     # --- server ---
+    dashboard_password: str | None = None
     host: str = "127.0.0.1"
     port: int = 8000
     data_dir: Path = ROOT / "hive_data"
@@ -135,6 +136,7 @@ def load_config() -> Config:
         alpaca_feed=_env("ALPACA_DATA_FEED", "sip").lower(),
         alpaca_live_feed=_env("ALPACA_LIVE_FEED", "iex").lower(),
         paper_scale=_float("PAPER_SIZE_SCALE", 1.0),
+        dashboard_password=_env("DASHBOARD_PASSWORD"),
         host=_env("HOST", "127.0.0.1"),
         port=_int("PORT", 8000),
         data_dir=Path(_env("HIVE_DATA_DIR", str(ROOT / "hive_data"))),

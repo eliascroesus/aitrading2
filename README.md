@@ -24,7 +24,29 @@ A self-improving swarm of Claude agents whose single objective is finding intrad
              ALPACA PAPER  ── forward-test the champion, virtual challenge on real fills
 ```
 
-## Quick start
+## Run it in the cloud (no install): Railway
+
+1. Go to **railway.com** and log in with GitHub.
+2. **New Project → Deploy from GitHub repo →** pick `eliascroesus/aitrading2`. Railway finds the `Dockerfile` and builds it.
+3. Open the service, then **Variables**, and add:
+
+   | Variable | Value |
+   |---|---|
+   | `ANTHROPIC_API_KEY` | your key from console.anthropic.com (`sk-ant-…`) |
+   | `ALPACA_API_KEY` | Alpaca **paper** key (`PK…`) |
+   | `ALPACA_SECRET_KEY` | Alpaca paper secret |
+   | `DASHBOARD_PASSWORD` | any password; needed to open the dashboard |
+   | `HIVE_LLM_BUDGET_USD` | optional spend cap, e.g. `20` |
+
+   Any other setting from `.env.example` can be added the same way.
+4. Add a **Volume** to the service with mount path **`/data`** so strategies and agents survive redeploys.
+5. **Settings → Networking → Generate Domain**, open the link and enter your password.
+
+Every push to `main` redeploys automatically. Railway bills for CPU and RAM; `HIVE_WORKERS` (default 2 in the container) sets how many CPU cores the backtester uses. Claude API usage is billed separately by Anthropic.
+
+## Run it on your own computer
+
+
 
 ```bash
 git clone https://github.com/eliascroesus/aitrading2.git
