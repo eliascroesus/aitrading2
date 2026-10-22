@@ -24,25 +24,31 @@ A self-improving swarm of Claude agents whose single objective is finding intrad
              ALPACA PAPER  ── forward-test the champion, virtual challenge on real fills
 ```
 
-## Run it in the cloud (no install): Railway
+## Run it for free in GitHub Codespaces (easiest, nothing to install)
 
-1. Go to **railway.com** and log in with GitHub.
-2. **New Project → Deploy from GitHub repo →** pick `eliascroesus/aitrading2`. Railway finds the `Dockerfile` and builds it.
-3. Open the service, then **Variables**, and add:
+1. **Save your keys on GitHub (once):** github.com → your profile picture → **Settings → Codespaces → Secrets → New secret**. Add each of these and give it access to the `aitrading2` repository:
+   `ANTHROPIC_API_KEY`, `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, and optionally `HIVE_LLM_BUDGET_USD` (e.g. `20`).
+2. On the repo page click **Code → Codespaces → Create codespace on main**.
+3. Wait a couple of minutes. It installs everything, starts the hive, and opens the dashboard in a new tab. If the tab doesn't open, go to the **Ports** tab and click the globe icon next to port 8000.
 
-   | Variable | Value |
-   |---|---|
-   | `ANTHROPIC_API_KEY` | your key from console.anthropic.com (`sk-ant-…`) |
-   | `ALPACA_API_KEY` | Alpaca **paper** key (`PK…`) |
-   | `ALPACA_SECRET_KEY` | Alpaca paper secret |
-   | `DASHBOARD_PASSWORD` | any password; needed to open the dashboard |
-   | `HIVE_LLM_BUDGET_USD` | optional spend cap, e.g. `20` |
+Free GitHub accounts get about 60 hours a month on this 2-core machine. A codespace stops after a period of inactivity: raise **Settings → Codespaces → Default idle timeout** to 240 minutes, and stop it from github.com/codespaces when you're done. Your data stays in the codespace between sessions. The forwarded port is private to your GitHub login, so no dashboard password is needed.
 
-   Any other setting from `.env.example` can be added the same way.
-4. Add a **Volume** to the service with mount path **`/data`** so strategies and agents survive redeploys.
-5. **Settings → Networking → Generate Domain**, open the link and enter your password.
+## Run it for free on Hugging Face Spaces (stays on)
 
-Every push to `main` redeploys automatically. Railway bills for CPU and RAM; `HIVE_WORKERS` (default 2 in the container) sets how many CPU cores the backtester uses. Claude API usage is billed separately by Anthropic.
+1. Create a free account at **huggingface.co**, then **New Space**: pick **Docker** as the SDK, the **Blank** template, the free **CPU basic** hardware (2 vCPU, 16 GB RAM), and set it to **Private**. Note its name, e.g. `yourname/hivemind`.
+2. In the Space **Settings → Variables and secrets**, add the secrets `ANTHROPIC_API_KEY`, `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `DASHBOARD_PASSWORD` and optionally `HIVE_LLM_BUDGET_USD`.
+3. On huggingface.co go to **Settings → Access Tokens** and create a token with **Write** access.
+4. On this GitHub repo go to **Settings → Secrets and variables → Actions**:
+   * **Secrets** tab, new secret `HF_TOKEN` = the token from step 3
+   * **Variables** tab, new variable `HF_SPACE` = your Space name, e.g. `yourname/hivemind`
+5. Go to **Actions → Deploy to Hugging Face Space → Run workflow**. From then on, every push to `main` redeploys automatically.
+6. Open `https://yourname-hivemind.hf.space` (your Space's direct link) and log in with your `DASHBOARD_PASSWORD`.
+
+Free Spaces go to sleep after about 48 hours without visitors and restart on the next visit. Free Spaces have no persistent storage, so a restart begins a fresh hive. Export strategies you want to keep from the strategy drawer.
+
+## Paid alternative: Railway / Render
+
+The `Dockerfile` works on any Docker host. Set the same environment variables plus `DASHBOARD_PASSWORD`, attach a persistent volume at `/data`, and expose port 8000. Railway and Render both deploy straight from this GitHub repo.
 
 ## Run it on your own computer
 

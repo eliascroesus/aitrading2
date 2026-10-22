@@ -12,7 +12,9 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 COPY hive ./hive
 
-# /data holds the database and the market-data cache; mount a volume there so it survives redeploys
-VOLUME ["/data"]
+# /data holds the database and the market-data cache. Attach a persistent volume at /data
+# where the host supports it (Railway, Render, HF persistent storage). World-writable because
+# some hosts (Hugging Face Spaces) run the container as a non-root user.
+RUN mkdir -p /data && chmod 777 /data
 EXPOSE 8000
 CMD ["python", "-m", "hive"]

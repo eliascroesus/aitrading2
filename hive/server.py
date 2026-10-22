@@ -139,7 +139,9 @@ def create_app(cfg: Config) -> FastAPI:
             raise HTTPException(401, "wrong password")
         resp = JSONResponse({"ok": True})
         secure = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
-        resp.set_cookie("hive_auth", token, max_age=60 * 60 * 24 * 30, httponly=True, samesite="lax", secure=secure)
+        # SameSite=None over https so the login also works when the dashboard is embedded (e.g. a Hugging Face Space page)
+        resp.set_cookie("hive_auth", token, max_age=60 * 60 * 24 * 30, httponly=True,
+                        samesite="none" if secure else "lax", secure=secure)
         return resp
 
     def need_hive() -> Hive:

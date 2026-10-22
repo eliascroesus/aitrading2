@@ -1,0 +1,29 @@
+{
+  "name": "HIVEMIND",
+  "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "hostRequirements": { "cpus": 2 },
+  "postCreateCommand": "pip install --user -r requirements.txt",
+  "postAttachCommand": "python -m hive",
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": { "label": "HIVEMIND dashboard", "onAutoForward": "openBrowser" }
+  },
+  "containerEnv": { "HIVE_WORKERS": "2" },
+  "secrets": {
+    "ANTHROPIC_API_KEY": {
+      "description": "Anthropic API key (sk-ant-...). Powers the Overmind and drones.",
+      "documentationUrl": "https://console.anthropic.com/settings/keys"
+    },
+    "ALPACA_API_KEY": {
+      "description": "Alpaca PAPER trading API key (PK...). Market data + paper trading.",
+      "documentationUrl": "https://app.alpaca.markets/paper/dashboard/overview"
+    },
+    "ALPACA_SECRET_KEY": {
+      "description": "Alpaca PAPER trading secret key.",
+      "documentationUrl": "https://app.alpaca.markets/paper/dashboard/overview"
+    },
+    "HIVE_LLM_BUDGET_USD": {
+      "description": "Optional: stop Claude spending after this many dollars, e.g. 20."
+    }
+  }
+}
