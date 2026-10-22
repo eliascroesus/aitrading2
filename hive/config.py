@@ -48,6 +48,17 @@ class Config:
     llm_budget_usd: float | None = None
     llm_concurrency: int = 4
 
+    # --- when Claude is used ---
+    claude_mode: str = "economy"  # economy: Claude only for idea bursts, operator orders and prop-ready reviews; full: always on
+    burst_after_min: float = 15.0  # minutes without improvement before an idea burst
+    burst_cooldown_min: float = 20.0  # minimum minutes between idea bursts
+    burst_rounds: int = 1  # rounds each drone thinks per burst
+    prop_reviews: bool = True  # Claude audits strategies/combos that become prop-ready
+    ready_min_pass: float = 0.40  # holdout pass rate (within the target days) needed to count as prop-ready
+    ready_min_edge: float = 0.15  # ...and at least this far above the zero-edge luck baseline
+    ready_max_gap: float = 0.15  # ...and validation vs holdout within this much
+    ready_min_trades: int = 20  # ...with at least this many holdout trades
+
     # --- hive dynamics ---
     max_drones: int = 4
     strategies_per_round: int = 5
@@ -115,6 +126,15 @@ def load_config() -> Config:
         llm_fallbacks=_bool("HIVE_LLM_FALLBACKS", True),
         llm_budget_usd=float(budget) if budget else None,
         llm_concurrency=_int("HIVE_LLM_CONCURRENCY", 4),
+        claude_mode=_env("HIVE_CLAUDE_MODE", "economy").lower(),
+        burst_after_min=_float("HIVE_BURST_AFTER_MIN", 15.0),
+        burst_cooldown_min=_float("HIVE_BURST_COOLDOWN_MIN", 20.0),
+        burst_rounds=_int("HIVE_BURST_ROUNDS", 1),
+        prop_reviews=_bool("HIVE_PROP_REVIEWS", True),
+        ready_min_pass=_float("HIVE_READY_MIN_PASS", 0.40),
+        ready_min_edge=_float("HIVE_READY_MIN_EDGE", 0.15),
+        ready_max_gap=_float("HIVE_READY_MAX_GAP", 0.15),
+        ready_min_trades=_int("HIVE_READY_MIN_TRADES", 20),
         max_drones=_int("HIVE_MAX_DRONES", 4),
         strategies_per_round=_int("HIVE_STRATEGIES_PER_ROUND", 5),
         drone_max_strikes=_int("HIVE_DRONE_MAX_STRIKES", 3),

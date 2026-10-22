@@ -170,7 +170,13 @@ function renderKpis(d) {
   $("#k-om").textContent = `Gen ${s.overmind_gen}`;
   $("#k-stag").textContent = `cycle ${s.cycle} · stagnation ${s.stagnation}/${s.patience} · ${s.evolver_focus}`;
   $("#k-spend").textContent = money(s.spend, 2);
-  $("#k-calls").textContent = `${s.llm_calls} calls${s.budget ? ` · budget ${money(s.budget, 0)}` : ""}`;
+  let mode = "";
+  if (d.mode.llm === "claude" && s.claude_mode === "economy") {
+    mode = s.burst_active ? " · idea burst running" : ` · economy, burst after ${Math.max(0, s.burst_after_min - s.stalled_min).toFixed(0)}m more stall`;
+  } else if (d.mode.llm === "claude") {
+    mode = " · full mode";
+  }
+  $("#k-calls").textContent = `${s.llm_calls} calls${s.budget ? ` · budget ${money(s.budget, 0)}` : ""}${mode}`;
 }
 
 function renderChampion(d) {
@@ -197,7 +203,7 @@ function renderAgents(d) {
 function agentCard(a, d) {
   const isOM = a.kind === "overmind";
   const st = a.status;
-  const label = st === "thinking" ? "thinking…" : st === "evaluating" ? "backtesting…" : "idle";
+  const label = st === "thinking" ? "thinking…" : st === "evaluating" ? "backtesting…" : st === "sleeping" ? "asleep until next idea burst" : "idle";
   const maxStrikes = isOM ? d.stats.patience : d.stats.max_strikes;
   const lives = isOM
     ? `<div class="stagbar" title="stagnant cycles before this Overmind is deleted">${Array.from({ length: maxStrikes }, (_, i) => `<i class="${i < a.strikes ? "on" : ""}"></i>`).join("")}</div>`
@@ -228,6 +234,28 @@ function agentCard(a, d) {
 }
 
 // ---------------------------------------------------------------- leaderboard
+const VERDICTS = { ready_for_paper: ["good", "Claude: paper-test it"], needs_work: ["warn", "Claude: needs work"], reject: ["bad", "Claude: reject"] };
+function verdictTag(v) {
+  if (!v || !VERDICTS[v]) return "";
+  const [cls, text] = VERDICTS[v];
+  return `<span class="tag ${cls}">${text}</span> `;
+}
+
+function reviewHtml(rv, ready) {
+  if (!rv) {
+    return ready ? `<div><div class="section-title">Claude review</div><div class="muted small">Prop-ready. A Claude review is queued (needs an Anthropic key).</div></div>` : "";
+  }
+  const list = (xs) => (xs && xs.length ? `<ul class="rv-list">${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : `<div class="muted small">—</div>`);
+  return `<div class="review">
+    <div class="section-title">Claude review</div>
+    <div class="row">${verdictTag(rv.verdict)}<span class="muted small">${esc(rv.confidence)} confidence</span></div>
+    <div class="rv-h">How to trade it</div><div class="rationale">${esc(rv.rules_in_plain_english)}</div>
+    <div class="rv-h">Why it might work</div><div class="muted">${esc(rv.why_it_might_work)}</div>
+    <div class="rv-h">Risks</div>${list(rv.risks)}
+    <div class="rv-h">Paper-test checklist</div>${list(rv.paper_test_checklist)}
+    <div class="rv-h">Suggested tweaks</div>${list(rv.suggested_tweaks)}
+  </div>`;
+}
 const MARKET_NAMES = { MNQ: "Nasdaq", NQ: "Nasdaq", MES: "S&P 500", ES: "S&P 500", MGC: "Gold", GC: "Gold", M6E: "EUR/USD", M6B: "GBP/USD", MBT: "Bitcoin", MET: "Ether", M2K: "Russell", MYM: "Dow" };
 
 function renderMarketFilter(d) {
@@ -266,7 +294,7 @@ function renderBoard(d) {
   $("#board").innerHTML = rows.length ? rows.map((r) => `
     <tr data-uid="${r.uid}" class="${r.rank === 1 ? "top1" : ""} ${prev && !prev.has(r.uid) ? "flash" : ""}">
       <td>${r.rank}</td>
-      <td class="left"><span class="sname" title="${esc(r.name)}">${esc(r.name)}</span><span class="ssub">${esc(r.author)} · ${esc(r.origin)} · ${esc(r.sides)}</span></td>
+      <td class="left"><span class="sname" title="${esc(r.name)}">${r.ready ? '<span class="tag ready">PROP-READY</span> ' : ""}${verdictTag(r.verdict)}${esc(r.name)}</span><span class="ssub">${esc(r.author)} · ${esc(r.origin)} · ${esc(r.sides)}</span></td>
       <td>${esc(r.instrument)} ${r.timeframe}m</td>
       <td><span class="fam">${esc(r.family.replace("_", " "))}</span></td>
       <td><span class="fitbar" title="${r.robust ? `robustness-checked; neighbours' median fitness ${num(r.robust_median, 3)}` : "robustness check pending"}">${r.robust ? '<b class="pos">✓</b>' : '<span class="muted">·</span>'} ${num(r.score, 3)}<span class="bar"><i style="width:${Math.max(2, r.score * 100)}%"></i></span></span></td>
@@ -304,7 +332,7 @@ function renderCombos(d) {
   $("#combos").innerHTML = rows.length ? rows.map((c, i) => `
     <tr data-combo="${esc(c.key)}">
       <td>${i + 1}</td>
-      <td class="left"><div class="members">${c.members.map((m) => `<span><span class="mk">${esc(m.instrument)} ${m.timeframe}m</span>${esc(m.name)}</span>`).join("")}</div></td>
+      <td class="left"><div class="members">${c.ready ? '<span><span class="tag ready">PROP-READY</span> ' + verdictTag(c.verdict) + "</span>" : ""}${c.members.map((m) => `<span><span class="mk">${esc(m.instrument)} ${m.timeframe}m</span>${esc(m.name)}</span>`).join("")}</div></td>
       <td>×${c.scale}</td>
       <td>${num(c.fitness, 3)}</td>
       <td class="warn">${pct(c.val_fast)}</td>
@@ -571,6 +599,7 @@ async function openComboDrawer(key) {
     const segs = [["Train", r.train, ""], ["Validation", r.val, ""], ["Holdout", r.test, "hold"]];
     $("#d-body").innerHTML = `
       <div class="drawer-actions"><button class="btn primary small" data-deploy-combo="${esc(key)}" ${state.snap?.paper ? "" : "disabled"}>Paper trade this combo</button></div>
+      ${reviewHtml(c.review, c.ready)}
       <div><div class="section-title">Members (each risk_usd is multiplied by ${r.scale})</div>
         <div class="rules">${c.members.map((m) => `<div class="rule" data-open-uid="${m.uid}" style="cursor:pointer"><div class="k">${esc(m.instrument)} ${m.timeframe}m · ${esc(m.family)} · risk $${Math.round(m.risk_usd * r.scale)}</div><code>${esc(m.name)}</code></div>`).join("")}</div></div>
       <div><div class="section-title">Challenge simulation (${esc(state.snap?.mode.rules_name || "")})</div>
@@ -619,6 +648,7 @@ function renderDrawer(rec) {
       <a class="btn small" href="/api/strategy/${s.uid}/export" download>Export JSON</a>
       <button class="btn small" id="d-copy">Copy rules</button>
     </div>
+    ${reviewHtml(rec.review, rec.ready)}
     <div>
       <div class="section-title">Challenge simulation (${esc(state.snap?.mode.rules_name || "")})</div>
       <table class="seg-table">

@@ -47,7 +47,14 @@ async def messages(request: Request):
     REQUESTS.append({"headers": dict(request.headers), "query": str(request.url.query), "body": body})
     system = body["system"][0]["text"] if isinstance(body.get("system"), list) else str(body.get("system"))
     n = next(_counter)
-    if "OVERMIND" in system:
+    if "risk desk" in system:
+        payload = {"verdict": "ready_for_paper", "confidence": "medium",
+                   "rules_in_plain_english": "Buy the first 5-minute candle direction after 9:35, stop 1 ATR, take 2R, one trade a day.",
+                   "why_it_might_work": "Opening order-flow imbalance tends to persist into the first hour.",
+                   "risks": ["Proxy ETF data, not real futures", "Only 5 years of history"],
+                   "paper_test_checklist": ["Fills within 1 tick of the backtest", "Daily P&L within the simulated range"],
+                   "suggested_tweaks": ["Skip FOMC days"]}
+    elif "OVERMIND" in system:
         payload = {
             "assessment": f"mock assessment {n}",
             "directive": "Concentrate on opening-range breakouts on MNQ with one trade per day.",

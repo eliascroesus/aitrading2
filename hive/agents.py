@@ -151,6 +151,56 @@ def overmind_schema(instruments: list[str]) -> dict:
     }
 
 
+REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["ready_for_paper", "needs_work", "reject"]},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "rules_in_plain_english": {"type": "string", "description": "how to trade it, step by step, for a human"},
+        "why_it_might_work": {"type": "string"},
+        "risks": {"type": "array", "items": {"type": "string"}},
+        "paper_test_checklist": {"type": "array", "items": {"type": "string"}},
+        "suggested_tweaks": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["verdict", "confidence", "rules_in_plain_english", "why_it_might_work", "risks", "paper_test_checklist", "suggested_tweaks"],
+    "additionalProperties": False,
+}
+
+
+def review_system_prompt(rules: PropRules) -> str:
+    return f"""You are the risk desk of HIVEMIND. A strategy (or a combo of strategies traded together, one per instrument) has just met the automatic prop-ready criteria. Before the operator pays for a prop-firm challenge, audit it hard.
+
+CHALLENGE: {rules.describe()}
+
+How the numbers were produced: intraday backtest on ETF/spot proxies rescaled to futures points (US regular hours only), conservative fills (next-bar entry, 1 tick slippage, stop-first on ambiguous bars, commissions), then Monte Carlo replays of the challenge. Train (first 60% of history), validation (next 20%) and the untouched holdout (last 20%). "Luck" is the pass rate of the same risk with the edge removed. Robustness = performance of variants with every setting nudged.
+
+Look for: overfitting (validation far above holdout, few trades, fragile parameters), regime dependence, look-ahead or data artefacts (e.g. proxy ETFs, thin forex ETFs, crypto only in US hours), sizing that only passes by luck, rule features a real prop firm would object to, and anything that would make live results worse than the backtest. Be concrete and quantitative. Return JSON matching the schema; the verdict is ready_for_paper only if you would forward-test it on a paper account now."""
+
+
+def review_user_prompt(kind: str, payload: dict) -> str:
+    lines = [f"CANDIDATE TYPE: {kind}"]
+    for spec in payload["specs"]:
+        lines.append(f"- {spec['name']} :: {fmt_spec(spec)}")
+    r = payload["result"]
+    for seg in ("train", "val", "test"):
+        m = r[seg]
+        lines.append(
+            f"{seg.upper()}: pass within {r.get('fast_days', 7)}d {m.get('pass_fast', 0):.0%} (luck {m.get('luck_fast', 0):.0%}), "
+            f"pass in 30d {m['pass_mc']:.0%} (luck {m.get('luck', 0):.0%}), trades {m['trades']}, net ${m['net']:,.0f}, max DD ${m.get('max_dd', 0):,.0f}, "
+            f"fail by max loss {m.get('fail_maxloss', 0):.0%}, median days to pass {m.get('median_days')}"
+        )
+    if r.get("folds"):
+        lines.append("Train folds pass rates: " + ", ".join(f"{x:.0%}" for x in r["folds"]))
+    if r.get("robust"):
+        lines.append(f"Robustness: {r['robust']['n']} nudged variants, median fitness {r['robust']['median']:.3f} vs own {r['fitness']:.3f}, worst {r['robust']['min']:.3f}")
+    if kind == "combo":
+        lines.append(f"Combo size multiplier {r.get('scale')}, daily P&L correlation between members {r.get('corr', 0):.2f}")
+    else:
+        lines.append(f"Exit reasons: {r.get('exit_reasons')}; long share {r.get('long_share', 0):.0%}; avg contracts {r.get('avg_qty', 0):.1f}; conditions per side {r.get('conditions')}")
+    lines.append("Audit it now.")
+    return "\n".join(lines)
+
+
 # ------------------------------------------------------------------------------- prompts
 
 
@@ -308,6 +358,13 @@ def overmind_user_prompt(state: dict) -> str:
         f"CYCLE {s['cycle']} | elapsed {s['elapsed_min']:.0f} min | strategies tested {s['tested']:,} | best fitness {s['best_fitness']:.3f} "
         f"(best validation pass rate {s['best_val_pass']:.0%}) | stagnant cycles {s['stagnation']}/{s['patience']} | LLM spend ${s['spend']:.2f}",
     ]
+    if s.get("economy"):
+        lines.append(
+            "MODE: ECONOMY. Drones sleep and only think during idea bursts (one round each); the free genetic evolver does the "
+            "searching in between. Use this cycle to point the drones at genuinely new ideas, families or markets."
+        )
+    if s.get("burst_reason"):
+        lines.append(f"THIS CYCLE IS AN IDEA BURST because: {s['burst_reason']}")
     if s.get("post_mortems"):
         lines.append("\nPREDECESSOR POST-MORTEMS:")
         lines += [f"- {p}" for p in s["post_mortems"][-3:]]

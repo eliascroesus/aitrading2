@@ -357,3 +357,14 @@ table.board { width: 100%; border-collapse: collapse; font-size: 12px; }
 .legs { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .leg { border: 1px solid var(--line); border-radius: 9px; padding: 7px 10px; background: var(--bg2); font-size: 12px; display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .leg .lm { color: var(--muted); }
+
+.state.sleeping { color: var(--dim); }
+.state.sleeping .dot { background: var(--line2); }
+.tag { display: inline-block; font-family: var(--sans); font-size: 9.5px; font-weight: 700; letter-spacing: 0.05em; padding: 1px 6px; border-radius: 4px; vertical-align: 1px; border: 1px solid var(--line2); color: var(--muted); }
+.tag.ready { color: var(--green); border-color: rgba(61, 220, 151, 0.5); background: var(--green-bg); }
+.tag.good { color: var(--green); border-color: rgba(61, 220, 151, 0.35); }
+.tag.warn { color: var(--amber); border-color: rgba(245, 181, 68, 0.4); }
+.tag.bad { color: var(--red); border-color: rgba(255, 93, 108, 0.4); }
+.review { border: 1px solid rgba(61, 220, 151, 0.25); background: rgba(61, 220, 151, 0.04); border-radius: 10px; padding: 12px 14px; }
+.rv-h { font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; margin: 10px 0 4px; }
+.rv-list { margin: 0; padding-left: 18px; color: #c7cdd7; font-size: 12.5px; display: flex; flex-direction: column; gap: 3px; }

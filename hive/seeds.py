@@ -104,6 +104,15 @@ ENTRY_TEMPLATES = [
     ("candle", "engulf_bull()", "engulf_bear()"),
     ("gap", "bar == 0 and gap < -{g}", "bar == 0 and gap > {g}"),
     ("session", "tod >= {t} and close > session_high(570, {t2})", "tod >= {t} and close < session_low(570, {t2})"),
+    # from the research report
+    ("breakout", "close > day_open + {kk} * (prev_high - prev_low)", "close < day_open - {kk} * (prev_high - prev_low)"),  # Larry Williams volatility breakout
+    ("trend", "adx(14) > {adx} and low <= ema(close, 20) and close > ema(close, 20)", "adx(14) > {adx} and high >= ema(close, 20) and close < ema(close, 20)"),  # Raschke Holy Grail
+    ("liquidity_sweep", "prev_close < prev_low + 0.2 * (prev_high - prev_low) and sweep_pdl()", "prev_close > prev_high - 0.2 * (prev_high - prev_low) and sweep_pdh()"),  # Raschke 80-20
+    ("liquidity_sweep", "low < pwl and close > pwl", "high > pwh and close < pwh"),  # previous-week level sweep
+    ("orb", "close > or_high(30) and open_ret(30) > 0", "close < or_low(30) and open_ret(30) < 0"),  # opening drive
+    ("candle", "within(inside_bar(), 1) and close > shift(high, 1)", "within(inside_bar(), 1) and close < shift(low, 1)"),  # inside-bar breakout
+    ("vwap", "close < vwap - {k} * atr(14) and rising(close, 1)", "close > vwap + {k} * atr(14) and falling(close, 1)"),  # stretched from VWAP, snap back
+    ("momentum", "open_ret(60) > {pct} / 100 and close > vwap and tod >= 630", "open_ret(60) < -{pct} / 100 and close < vwap and tod >= 630"),  # trend-day continuation
 ]
 
 
@@ -125,6 +134,8 @@ def _params(rng: np.random.Generator) -> dict:
         "g": round(float(rng.choice([0.002, 0.003, 0.005, 0.008])), 4),
         "t": t2,
         "t2": t2,
+        "kk": round(float(rng.choice([0.2, 0.3, 0.4, 0.5, 0.6])), 2),
+        "adx": int(rng.choice([20, 25, 30, 35])),
     }
 
 
@@ -165,6 +176,21 @@ def random_strategy(rng: np.random.Generator, instruments: list[str], timeframes
         origin="random",
     )
     return spec.normalized(instruments, timeframes)
+
+
+def transplant(parent: StrategySpec, rng: np.random.Generator, instruments: list[str], timeframes: list[int]) -> StrategySpec:
+    """A brand-new entry idea grafted onto a proven strategy's exits, sizing, session and market."""
+    fresh = random_strategy(rng, instruments, timeframes, author="evolver")
+    child = StrategySpec(**{**parent.__dict__, "long_entry": fresh.long_entry if parent.long_entry else "",
+                            "short_entry": fresh.short_entry if parent.short_entry else "", "family": fresh.family})
+    if not child.long_entry and not child.short_entry:
+        child.long_entry = fresh.long_entry or fresh.short_entry
+    child = child.normalized(instruments, timeframes)
+    if child.errors():
+        return fresh
+    child.origin, child.author, child.parents, child.rationale = "transplant", "evolver", parent.uid, ""
+    child.name = f"{fresh.family.replace('_', ' ').title()} transplant #{int(rng.integers(1000, 9999))}"
+    return child
 
 
 def seed_strategies(instruments: list[str], timeframes: list[int]) -> list[StrategySpec]:

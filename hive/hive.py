@@ -116,6 +116,17 @@ class Hive:
             self.last_cycle_best = score(self.best)
         self.robust_queue: list = []
         self.robust_queued: set[str] = set()
+        # economy mode: Claude is used for idea bursts, operator orders and prop-ready reviews only
+        self.economy = cfg.claude_mode != "full"
+        self.last_improve_t = time.time()
+        self.last_burst_t = 0.0
+        self.burst_until = 0.0
+        self.burst_reason = ""
+        self.overmind_llm_due = True
+        self.drone_credits: dict[str, int] = {}
+        self.reviews: dict[str, dict] = store.kv_get("reviews", {})
+        self.ready: set[str] = set()
+        self.loop_interval = 30.0  # seconds between economy / review checks
         self.combos: dict[str, dict] = {c["result"]["key"]: c for c in store.kv_get("combos", [])}
         self.combo_tried: set[str] = set(self.combos)
         for a in store.load_agents():
@@ -145,10 +156,14 @@ class Hive:
         for a in list(self.agents.values()):
             if a.kind == "drone" and a.alive:
                 self._start_drone(a)
+        if self.llm and self.economy:
+            self._trigger_burst("hive started: give the drones one round to seed new ideas", force=True)
         self.tasks = [
             asyncio.create_task(self._evolver_loop(), name="evolver"),
             asyncio.create_task(self._robust_loop(), name="robustness"),
             asyncio.create_task(self._combo_loop(), name="combos"),
+            asyncio.create_task(self._economy_loop(), name="economy"),
+            asyncio.create_task(self._review_loop(), name="reviews"),
             asyncio.create_task(self._overmind_loop(), name="overmind"),
             asyncio.create_task(self._housekeeping_loop(), name="housekeeping"),
         ]
@@ -178,7 +193,90 @@ class Hive:
         self.operator_notes = self.operator_notes[-10:]
         self.store.kv_set("operator_notes", self.operator_notes)
         self.bus.emit("operator", f"Operator order: {text}")
+        if self.llm and self.economy:
+            self._trigger_burst(f"operator order: {text[:200]}", force=True)
         self.wake_overmind.set()
+
+    # ------------------------------------------------------------------ economy mode
+    def _trigger_burst(self, reason: str, force: bool = False) -> bool:
+        now = time.time()
+        if not force and now - self.last_burst_t < self.cfg.burst_cooldown_min * 60:
+            return False
+        if self.llm and self.llm.over_budget():
+            return False
+        self.last_burst_t = now
+        self.burst_until = now + 300  # drones spawned in the next 5 minutes also get a round
+        self.burst_reason = reason
+        self.overmind_llm_due = True
+        for a in self.agents.values():
+            if a.kind == "drone" and a.alive:
+                self.drone_credits[a.id] = self.drone_credits.get(a.id, 0) + self.cfg.burst_rounds
+        self.bus.emit("system", f"Idea burst: {reason}. Claude agents wake up for {self.cfg.burst_rounds} round(s).")
+        self.wake_overmind.set()
+        return True
+
+    async def _economy_loop(self) -> None:
+        """Wakes Claude only when the free evolver has stalled for a while."""
+        while not self.stopping:
+            await asyncio.sleep(self.loop_interval)
+            if not (self.llm and self.economy) or not self.running.is_set():
+                continue
+            stalled = time.time() - self.last_improve_t
+            if stalled >= self.cfg.burst_after_min * 60:
+                self._trigger_burst(f"no improvement for {stalled / 60:.0f} minutes")
+
+    # ------------------------------------------------------------------ prop-ready candidates
+    def _is_ready(self, r: dict, combo: bool = False) -> bool:
+        if not r.get("ok", True) or (not combo and "robust_score" not in r):
+            return False
+        key = "pass_fast" if self.rules.target_days else "pass_mc"
+        lkey = "luck_fast" if self.rules.target_days else "luck"
+        t, v = r["test"], r["val"]
+        cfg = self.cfg
+        return (t.get(key, 0) >= cfg.ready_min_pass
+                and t.get(key, 0) - (t.get(lkey) or 0) >= cfg.ready_min_edge
+                and abs(v.get(key, 0) - t.get(key, 0)) <= cfg.ready_max_gap
+                and t.get("trades", 0) >= cfg.ready_min_trades)
+
+    async def _review_loop(self) -> None:
+        """Flags prop-ready strategies/combos and has Claude audit each one once."""
+        system = ag.review_system_prompt(self.rules)
+        while not self.stopping:
+            await asyncio.sleep(self.loop_interval)
+            try:
+                singles = [(r["spec"]["uid"], "strategy", [r["spec"]], r["result"]) for r in self.leaders(60)
+                           if self._is_ready(r["result"])]
+                combos = [(c["result"]["key"], "combo", c["members"], c["result"]) for c in self.best_combos(10)
+                          if self._is_ready(c["result"], combo=True)]
+                ready = singles + combos
+                newly = {k for k, *_ in ready} - self.ready
+                self.ready = {k for k, *_ in ready}
+                for key, kind, specs, _ in ready:
+                    if key in newly:
+                        names = " + ".join(sp["name"] for sp in specs)
+                        self.bus.emit("champion", f"PROP-READY {kind}: {names} (meets every readiness rule on untouched data)", uid=key)
+                if not (self.llm and self.cfg.prop_reviews) or self.llm.over_budget():
+                    continue
+                for key, kind, specs, result in ready[:3]:
+                    if key in self.reviews:
+                        continue
+                    payload = {"specs": specs, "result": result}
+                    data, cost = await self.llm.json_call(model=self.cfg.overmind_model, system=system,
+                                                          user=ag.review_user_prompt(kind, payload), schema=ag.REVIEW_SCHEMA,
+                                                          effort="high")
+                    data["t"], data["cost"], data["kind"] = time.time(), cost, kind
+                    self.reviews[key] = data
+                    self.store.kv_set("reviews", self.reviews)
+                    names = " + ".join(sp["name"] for sp in specs)
+                    self.bus.emit("overmind", f"Claude review of {names}: {data['verdict'].replace('_', ' ')} ({data['confidence']} confidence)", uid=key)
+                    break  # at most one review per tick
+            except asyncio.CancelledError:
+                raise
+            except LLMError as exc:
+                self.bus.emit("error", f"Review failed: {exc}", persist=False)
+            except Exception as exc:
+                log.exception("review loop failed")
+                self.bus.emit("error", f"Review loop error: {exc}", persist=False)
 
     # ------------------------------------------------------------------ evaluation
     async def evaluate_batch(self, specs: list[StrategySpec], author: str = "") -> list[tuple[dict, dict]]:
@@ -302,6 +400,8 @@ class Hive:
             res = top["result"]
             self.best_history.append([round(now, 1), round(new, 4), round(res["val"]["pass_mc"], 4),
                                       round(res["test"]["pass_mc"], 4), self.tested])
+        if new > prev + 0.003:
+            self.last_improve_t = now
         if new > prev + 0.004:
             res, spec = top["result"], top["spec"]
             checked = "robustness-checked" if "robust_score" in res else "robustness check pending"
@@ -420,13 +520,13 @@ class Hive:
             res = (await loop.run_in_executor(self.pool, evaluator.evaluate_combos, [c["members"]]))[0]
             if res.get("ok"):
                 c["result"] = res
-        return c
+        return {**c, "review": self.reviews.get(key), "ready": key in self.ready}
 
-    @staticmethod
-    def combo_summary(c: dict) -> dict:
+    def combo_summary(self, c: dict) -> dict:
         r = c["result"]
         return {
             "key": r["key"], "scale": r["scale"], "fitness": r["fitness"], "corr": r.get("corr"),
+            "ready": r["key"] in self.ready, "verdict": (self.reviews.get(r["key"]) or {}).get("verdict"),
             "members": [{"uid": m["uid"], "name": m["name"], "instrument": m["instrument"], "timeframe": m["timeframe"],
                          "family": m["family"]} for m in c["members"]],
             "val_fast": r["val"]["pass_fast"], "test_fast": r["test"]["pass_fast"], "test_pass": r["test"]["pass_mc"],
@@ -490,7 +590,9 @@ class Hive:
                     r = self.rng.random()
                     if len(elite) < 6 or r < explore:
                         batch.append(seeds.random_strategy(self.rng, self.inst_list, self.tfs, author="evolver"))
-                    elif r < explore + 0.15:
+                    elif r < explore + 0.08:  # new idea on proven exits/sizing: cheap structural exploration
+                        batch.append(seeds.transplant(self._parent(elite, niches), self.rng, self.inst_list, self.tfs))
+                    elif r < explore + 0.23:
                         batch.append(crossover(self._parent(elite, niches), self._parent(elite, niches), self.rng, self.inst_list, self.tfs))
                     else:
                         batch.append(mutate(self._parent(elite, niches), self.rng, self.inst_list, self.tfs))
@@ -515,6 +617,8 @@ class Hive:
         agent = ag.new_agent("drone", self.cfg.drone_model if self.llm else "procedural", self.overmind_gen,
                              specialty, mission, focus, name, spawned_by=by)
         self.agents[agent.id] = agent
+        if self.llm and self.economy and time.time() < self.burst_until:
+            self.drone_credits[agent.id] = self.cfg.burst_rounds
         self.store.save_agent(agent.to_dict())
         self.bus.emit("spawn", f"{by or 'Hive'} spawned drone {agent.name}: {specialty} (focus {focus})", agent=agent.id)
         self._start_drone(agent)
@@ -539,6 +643,12 @@ class Hive:
         consecutive_errors = 0
         while not self.stopping and agent.alive:
             await self.running.wait()
+            if self.llm and self.economy:
+                if self.drone_credits.get(agent.id, 0) <= 0:
+                    agent.status = "sleeping"
+                    await asyncio.sleep(2)
+                    continue
+                self.drone_credits[agent.id] -= 1
             if self.llm and self.llm.over_budget():
                 agent.status = "idle"
                 agent.last_thought = "Waiting: LLM budget reached (raise HIVE_LLM_BUDGET_USD)."
@@ -699,6 +809,8 @@ class Hive:
             "niches": niches,
             "leaders": self.leaders(10, diverse=True),
             "combos": [self.combo_summary(c) for c in self.best_combos(3)],
+            "economy": self.economy,
+            "burst_reason": self.burst_reason if time.time() < self.burst_until else "",
             "memory": self.memory,
             "directive": self.directive,
             "max_drones": self.cfg.max_drones,
@@ -712,8 +824,10 @@ class Hive:
             om.status = "thinking"
             self.cycle += 1
             decision = None
+            use_llm = bool(self.llm) and not self.llm.over_budget() and (not self.economy or self.overmind_llm_due)
             try:
-                if self.llm and not self.llm.over_budget():
+                if use_llm:
+                    self.overmind_llm_due = False
                     decision, cost = await self.llm.json_call(
                         model=om.model, system=self.overmind_system, user=ag.overmind_user_prompt(self._overmind_state()),
                         schema=self.overmind_schema, effort=self.cfg.overmind_effort,
@@ -828,11 +942,11 @@ class Hive:
         (t0, n0), (t1, n1) = self.rate[0], self.rate[-1]
         return (n1 - n0) / max(t1 - t0, 1e-6) * 60
 
-    @staticmethod
-    def summary(rec: dict) -> dict:
+    def summary(self, rec: dict) -> dict:
         s, r = rec["spec"], rec["result"]
         return {
             "uid": s["uid"], "name": s["name"], "instrument": s["instrument"], "timeframe": s["timeframe"],
+            "ready": s["uid"] in self.ready, "verdict": (self.reviews.get(s["uid"]) or {}).get("verdict"),
             "family": s["family"], "author": s.get("author", ""), "origin": s.get("origin", ""), "sides": "both" if s.get("long_entry") and s.get("short_entry") else ("long" if s.get("long_entry") else "short"),
             "fitness": r["fitness"], "score": score(rec), "robust": "robust_score" in r,
             "robust_median": (r.get("robust") or {}).get("median"),
@@ -874,6 +988,12 @@ class Hive:
                 "best_test_luck_fast": best["test"].get("luck_fast") if best else None,
                 "fast_days": self.rules.fast_days, "target_days": self.rules.target_days,
                 "robust_queue": len(self.robust_queue),
+                "claude_mode": "economy" if self.economy else "full",
+                "stalled_min": round((time.time() - self.last_improve_t) / 60, 1),
+                "burst_after_min": self.cfg.burst_after_min,
+                "burst_active": self.overmind_llm_due or any(v > 0 for v in self.drone_credits.values())
+                or any(a.kind == "drone" and a.status == "thinking" for a in self.agents.values()),
+                "ready_count": len(self.ready), "reviews_count": len(self.reviews),
                 "best_uid": self.best["spec"]["uid"] if self.best else None,
                 "best_name": self.best["spec"]["name"] if self.best else None,
                 "elapsed": self.prior_elapsed + time.time() - self.started,
@@ -907,6 +1027,7 @@ class Hive:
         rec = self.records.get(uid) or self.store.get(uid)
         if rec is None:
             return None
+        rec = {**rec, "review": self.reviews.get(uid), "ready": uid in self.ready}
         if rec["result"].get("ok") and "equity" not in rec["result"]:
             loop = asyncio.get_running_loop()
             res = (await loop.run_in_executor(self.pool, evaluator.evaluate_many, [rec["spec"]]))[0]
