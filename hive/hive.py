@@ -22,6 +22,10 @@ from .strategy import StrategySpec, crossover, mutate
 
 log = logging.getLogger("hive.core")
 
+STORE_MIN_FITNESS = 0.02  # strategies below this are counted but not written to disk
+STORE_MAX_ROWS = 20_000  # database keeps the best this many strategies
+SEEN_CAP = 250_000  # how many recent strategy fingerprints are remembered for de-duplication
+
 DEFAULT_MISSIONS = [
     ("ICT liquidity hunter", "Liquidity sweeps of PDH/PDL, opening-range and session highs/lows into fair value gaps; killzone timing (10:00-11:00 NY silver bullet, NY open).", "MNQ"),
     ("Opening-range & momentum", "Opening range breakouts (5-60 min), first-bar direction, intraday momentum into the close, VWAP trend holds.", "MNQ"),
@@ -59,10 +63,13 @@ class Hive:
 
         # state
         self.records: dict[str, dict] = {}
+        # dedupe memory is bounded so a run of days never grows without limit
         self.seen: set[str] = store.all_uids()
+        self.seen_fifo: deque = deque(self.seen)
         self.pending: set[str] = set()
-        total, ok = store.counts()
-        self.tested, self.valid = total, ok
+        counts = store.kv_get("counts")
+        self.tested, self.valid = (counts["tested"], counts["valid"]) if counts else store.counts()
+        self.niches: dict[str, list] = store.kv_get("niches", {})  # "family / instrument" -> [tested, best fitness]
         self.best: dict | None = None
         self.best_history: list = store.kv_get("best_history", [])
         self.scatter: deque = deque(store.kv_get("scatter", []), maxlen=2400)
@@ -196,16 +203,26 @@ class Hive:
 
     def _ingest(self, pairs: list[tuple[dict, dict]]) -> None:
         now = time.time()
-        self.store.save_results(pairs)
+        # only strategies worth looking at again are written to disk; the rest are just counted
+        keep = [(d, r) for d, r in pairs
+                if r.get("ok") and (r["fitness"] >= STORE_MIN_FITNESS or d.get("origin") in ("llm", "seed"))]
+        if keep:
+            self.store.save_results(keep)
         batch_fits: list[float] = []
         for spec, res in pairs:
-            self.seen.add(spec["uid"])
+            uid = spec["uid"]
+            if uid not in self.seen:
+                self.seen.add(uid)
+                self.seen_fifo.append(uid)
             self.tested += 1
             if not res.get("ok"):
                 continue
             self.valid += 1
             fit = res["fitness"]
             batch_fits.append(fit)
+            niche = self.niches.setdefault(f"{spec['family']} / {spec['instrument']}", [0, 0.0])
+            niche[0] += 1
+            niche[1] = max(niche[1], fit)
             if len(self.records) < 400 or fit > self._elite_floor():
                 self.records[spec["uid"]] = {"spec": spec, "result": res, "t": now}
             if self.best is None or fit > self.best["result"]["fitness"] + 1e-9:
@@ -224,8 +241,10 @@ class Hive:
             for f in picks:
                 self.scatter.append([round(now, 1), round(f, 4)])
         if len(self.records) > 520:
-            keep = sorted(self.records.values(), key=lambda r: r["result"]["fitness"], reverse=True)[:400]
-            self.records = {r["spec"]["uid"]: r for r in keep}
+            top = sorted(self.records.values(), key=lambda r: r["result"]["fitness"], reverse=True)[:400]
+            self.records = {r["spec"]["uid"]: r for r in top}
+        while len(self.seen_fifo) > SEEN_CAP:
+            self.seen.discard(self.seen_fifo.popleft())
         self.rate.append((now, self.tested))
 
     def _elite_floor(self) -> float:
@@ -458,7 +477,7 @@ class Hive:
     def _overmind_state(self) -> dict:
         best = self.best["result"] if self.best else None
         drones = [a.to_dict() for a in self.agents.values() if a.kind == "drone" and a.alive]
-        niches = [(k, (c, f)) for k, c, f in self.store.niches()[:24]]
+        niches = sorted(((k, (v[0], v[1])) for k, v in self.niches.items()), key=lambda x: -x[1][1])[:24]
         return {
             "cycle": self.cycle,
             "elapsed_min": (time.time() - self.started + self.prior_elapsed) / 60,
@@ -582,11 +601,17 @@ class Hive:
 
     # ------------------------------------------------------------------ housekeeping / state
     async def _housekeeping_loop(self) -> None:
+        ticks = 0
         while not self.stopping:
             await asyncio.sleep(10)
             self._persist_counters()
+            ticks += 1
+            if ticks % 60 == 0:  # every ~10 minutes keep the database small
+                await asyncio.to_thread(self.store.prune, STORE_MAX_ROWS)
 
     def _persist_counters(self) -> None:
+        self.store.kv_set("counts", {"tested": self.tested, "valid": self.valid})
+        self.store.kv_set("niches", self.niches)
         self.store.kv_set("best_history", self.best_history[-2000:])
         self.store.kv_set("scatter", list(self.scatter))
         self.store.kv_set("elapsed", self.prior_elapsed + time.time() - self.started)

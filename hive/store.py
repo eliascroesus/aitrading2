@@ -31,7 +31,7 @@ class Store:
         self.db.commit()
 
     # strategies
-    def save_results(self, rows: list[tuple[dict, dict]], keep_equity_above: float = 0.05) -> None:
+    def save_results(self, rows: list[tuple[dict, dict]], keep_equity_above: float = 0.3) -> None:
         data = []
         now = time.time()
         for spec, res in rows:
@@ -58,6 +58,17 @@ class Store:
 
     def update_result(self, uid: str, result: dict) -> None:
         self.db.execute("UPDATE strategies SET result=? WHERE uid=?", (json.dumps(result), uid))
+        self.db.commit()
+
+    def prune(self, max_rows: int, max_events: int = 5000) -> None:
+        """Keep only the best ``max_rows`` strategies and the latest ``max_events`` events."""
+        (n,) = self.db.execute("SELECT COUNT(*) FROM strategies").fetchone()
+        if n > max_rows:
+            self.db.execute(
+                "DELETE FROM strategies WHERE uid IN (SELECT uid FROM strategies ORDER BY fitness ASC LIMIT ?)",
+                (n - max_rows,),
+            )
+        self.db.execute("DELETE FROM events WHERE id <= (SELECT MAX(id) FROM events) - ?", (max_events,))
         self.db.commit()
 
     def all_uids(self) -> set[str]:

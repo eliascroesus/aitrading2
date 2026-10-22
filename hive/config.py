@@ -121,7 +121,7 @@ def load_config() -> Config:
         drone_cooldown_sec=_float("HIVE_DRONE_COOLDOWN_SEC", 20.0),
         overmind_interval_sec=_float("HIVE_OVERMIND_INTERVAL_SEC", 150.0),
         overmind_patience=_int("HIVE_OVERMIND_PATIENCE", 4),
-        workers=_int("HIVE_WORKERS", max(1, cpu - 1)),
+        workers=_int("HIVE_WORKERS", max(1, cpu // 2)),  # half the cores keeps a laptop usable
         ga_batch=_int("HIVE_GA_BATCH", 48),
         prop_preset=_env("PROP_PRESET", "topstep_50k"),
         instruments=[s.upper() for s in _list("INSTRUMENTS", "MNQ,MES,MGC")],

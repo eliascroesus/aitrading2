@@ -33,7 +33,9 @@ A self-improving swarm of Claude agents whose single objective is finding intrad
 
 Free GitHub accounts get about 60 hours a month on this 2-core machine. A codespace stops after a period of inactivity: raise **Settings → Codespaces → Default idle timeout** to 240 minutes, and stop it from github.com/codespaces when you're done. Your data stays in the codespace between sessions. The forwarded port is private to your GitHub login, so no dashboard password is needed.
 
-## Run it for free on Hugging Face Spaces (stays on)
+## Hugging Face Spaces (stays on; Docker Spaces now need a paid plan)
+
+As of late 2026 Hugging Face only offers Docker Spaces on paid plans, so this is no longer free. The setup still works if you upgrade:
 
 1. Create a free account at **huggingface.co**, then **New Space**: pick **Docker** as the SDK, the **Blank** template, the free **CPU basic** hardware (2 vCPU, 16 GB RAM), and set it to **Private**. Note its name, e.g. `yourname/hivemind`.
 2. In the Space **Settings → Variables and secrets**, add the secrets `ANTHROPIC_API_KEY`, `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `DASHBOARD_PASSWORD` and optionally `HIVE_LLM_BUDGET_USD`.
@@ -50,24 +52,34 @@ Free Spaces go to sleep after about 48 hours without visitors and restart on the
 
 The `Dockerfile` works on any Docker host. Set the same environment variables plus `DASHBOARD_PASSWORD`, attach a persistent volume at `/data`, and expose port 8000. Railway and Render both deploy straight from this GitHub repo.
 
-## Run it on your own computer
+## Run it on your own computer (double-click)
 
+1. Install **Python 3.10+** from python.org. On Windows, tick **"Add python.exe to PATH"**.
+2. On this repo's GitHub page: **Code → Download ZIP**, then unzip it.
+3. Open the folder and double-click:
+   * **Mac:** `start-mac.command`. If macOS blocks it, right-click it, choose **Open**, then **Open** again. If that's not offered, use **System Settings → Privacy & Security → Open Anyway**.
+   * **Windows:** `start-windows.bat`. If SmartScreen warns you, click **More info → Run anyway**.
+4. The first time, it asks for your Anthropic and Alpaca paper keys (paste and press Enter) and a spending cap. It saves them to `.env` in the folder, installs everything into `.venv` in the folder, and opens the dashboard at http://127.0.0.1:8000.
 
+Keep the window open while it runs; close it (or press Ctrl+C) to stop. Next time, just double-click again. It uses half your CPU cores (change with `HIVE_WORKERS` in `.env`) and never uses the GPU.
+
+### Removing it completely
+
+Everything HIVEMIND creates lives inside its folder: the app, its Python packages (`.venv`, about 250 MB), the database and market data (`hive_data`, capped at a few hundred MB) and your keys (`.env`). To remove it all:
+
+1. Close the HIVEMIND window.
+2. Delete the folder and empty the Trash / Recycle Bin.
+
+Optionally uninstall Python too (Windows: Settings → Apps → Python; Mac: delete the Python folder in Applications), and delete or regenerate the API keys in the Anthropic and Alpaca dashboards.
+
+### From a terminal instead
 
 ```bash
-git clone https://github.com/eliascroesus/aitrading2.git
-cd aitrading2
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env                                     # add ANTHROPIC_API_KEY + Alpaca paper keys
 python -m hive
 ```
-
-Open **http://127.0.0.1:8000**. Python 3.10+.
-
-* **No keys at all:** runs on synthetic demo data with procedural agents. Use this to see the machinery. Results on synthetic data mean nothing.
-* **`ANTHROPIC_API_KEY`:** the Overmind and drones become Claude agents.
-* **`ALPACA_API_KEY` / `ALPACA_SECRET_KEY` (paper):** real market history from Alpaca, plus one-click forward testing of any strategy on your paper account.
 
 ## What you see on the dashboard
 

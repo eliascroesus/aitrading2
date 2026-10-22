@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import webbrowser
 
 
 def main() -> None:
@@ -22,6 +25,9 @@ def main() -> None:
     )
     if cfg.host not in ("127.0.0.1", "localhost") and not cfg.dashboard_password:
         print("  WARNING   : dashboard is reachable from the network without a password; set DASHBOARD_PASSWORD\n")
+    if os.getenv("HIVE_OPEN_BROWSER") == "1":
+        url = f"http://127.0.0.1:{cfg.port}"
+        threading.Timer(2.5, webbrowser.open, args=(url,)).start()
     uvicorn.run(create_app(cfg), host=cfg.host, port=cfg.port, log_level="warning", proxy_headers=True, forwarded_allow_ips="*")
 
 
