@@ -119,6 +119,7 @@ h3 { margin: 0; }
   border: 1px solid var(--line); border-radius: var(--radius);
   padding: 14px 16px 16px; min-width: 0; display: flex; flex-direction: column;
 }
+.span-12 { grid-column: 1 / -1; }
 .span-8 { grid-column: span 8; }
 .span-6 { grid-column: span 6; }
 .span-4 { grid-column: span 4; }
@@ -348,3 +349,11 @@ table.board { width: 100%; border-collapse: collapse; font-size: 12px; }
   .legend { gap: 8px; }
   .drawer-body, .drawer-head { padding-left: 16px; padding-right: 16px; }
 }
+
+.combos-wrap { max-height: 380px; }
+.members { display: flex; flex-direction: column; gap: 2px; }
+.members span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 420px; display: block; }
+.members .mk { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-right: 6px; }
+.legs { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.leg { border: 1px solid var(--line); border-radius: 9px; padding: 7px 10px; background: var(--bg2); font-size: 12px; display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.leg .lm { color: var(--muted); }

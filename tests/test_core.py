@@ -213,16 +213,18 @@ def test_luck_baseline_separates_edge_from_volatility():
     noise = rng.normal(0, 600, 400)
     zero_edge = _days(noise)
     edge = _days(noise + 250)
-    assert propfirm.luck_baseline(rules, edge, np.random.default_rng(1)) < propfirm.pass_probability_mc(rules, edge, np.random.default_rng(1))["pass"] - 0.2
-    luck0 = propfirm.luck_baseline(rules, zero_edge, np.random.default_rng(2))
+    assert propfirm.luck_baseline(rules, edge, np.random.default_rng(1))["pass"] < propfirm.pass_probability_mc(rules, edge, np.random.default_rng(1))["pass"] - 0.2
+    luck0 = propfirm.luck_baseline(rules, zero_edge, np.random.default_rng(2))["pass"]
     pass0 = propfirm.pass_probability_mc(rules, zero_edge, np.random.default_rng(2))["pass"]
     assert abs(luck0 - pass0) < 0.15
 
 
 def test_target_days_from_env(monkeypatch):
-    monkeypatch.setenv("PROP_TARGET_DAYS", "7")
+    monkeypatch.delenv("PROP_TARGET_DAYS", raising=False)
+    assert propfirm.get_rules("topstep_50k").target_days == 7  # default goal: pass within 7 trading days
+    monkeypatch.setenv("PROP_TARGET_DAYS", "5")
     rules = propfirm.get_rules("topstep_50k")
-    assert rules.target_days == 7 and rules.fast_days == 7
+    assert rules.target_days == 5 and rules.fast_days == 5
     monkeypatch.setenv("PROP_TARGET_DAYS", "")
     assert propfirm.get_rules("topstep_50k").target_days is None
 
@@ -234,4 +236,21 @@ def test_evaluate_reports_luck_speed_and_complexity(ds):
     for seg in ("train", "val", "test"):
         assert 0.0 <= res[seg]["luck"] <= 1.0
         assert 0.0 <= res[seg]["pass_fast"] <= res[seg]["pass_mc"] + 1e-9
-    assert res["conditions"] >= 1 and res["fast_days"] == 10
+    assert res["conditions"] >= 1 and res["fast_days"] == 7
+
+
+def test_combo_evaluation():
+    raw_q = filter_rth(SyntheticProvider(seed=3).fetch("QQQ", 5, 160))
+    raw_g = filter_rth(SyntheticProvider(seed=3).fetch("GLD", 5, 160))
+    mnq, mgc = get_instrument("MNQ"), get_instrument("MGC")
+    d1 = build_dataset(raw_q, mnq, 5, "synthetic", mnq.proxy_ratio)
+    d2 = build_dataset(raw_g, mgc, 5, "synthetic", mgc.proxy_ratio)
+    evaluator.init_local({d1.key: d1, d2.key: d2}, propfirm.get_rules("topstep_50k"), {}, mc_sims=100)
+    a = seeds.seed_strategies(["MNQ"], [5])[0].to_dict()
+    b = seeds.seed_strategies(["MGC"], [5])[2].to_dict()
+    res = evaluator.evaluate_combo([a, b])
+    assert res["ok"], res
+    assert res["scale"] in evaluator.COMBO_SCALES and len(res["members"]) == 2
+    for seg in ("train", "val", "test"):
+        assert 0.0 <= res[seg]["pass_fast"] <= 1.0 and 0.0 <= res[seg]["luck_fast"] <= 1.0
+    assert 0.0 <= res["fitness"] <= 1.0 and res["equity"]

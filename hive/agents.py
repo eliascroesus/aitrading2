@@ -168,7 +168,18 @@ def _markets_text(instruments: dict[str, Instrument], datasets_meta: dict) -> st
 
 
 def drone_system_prompt(rules: PropRules, instruments: dict[str, Instrument], datasets_meta: dict, horizon: int) -> str:
-    speed_line = f"PASS SPEED: fitness counts only challenges passed within {rules.target_days} trading days." if rules.target_days else ""
+    speed_line = ""
+    if rules.target_days:
+        per_day = rules.profit_target / rules.target_days
+        cons = f"the consistency rule caps the best day at {rules.consistency_pct:.0%} of total profit, so " if rules.consistency_pct else ""
+        speed_line = (
+            f"PASS SPEED GOAL: fitness counts only challenges passed within {rules.target_days} trading days. That needs roughly "
+            f"${per_day:,.0f}+ net per trading day on average while never touching the max-loss floor: favour strategies that trade most days "
+            f"with positive expectancy and controlled daily swings, size risk_usd so a normal losing day costs well under the max loss, "
+            f"use daily_profit_stop_usd to bank good days ({cons}several solid days beat one huge one) and daily_loss_stop_usd to cap bad ones. "
+            "The hive automatically combines strategies on DIFFERENT instruments into one account, so strong specialists on markets the "
+            "leaders do not cover (and that make money on different days) are valuable."
+        )
     return f"""You are a strategy-design drone inside HIVEMIND, a swarm of AI agents with one objective: discover intraday futures strategies that pass prop-firm evaluation challenges with the highest possible probability and make money. Nothing else matters.
 
 THE CHALLENGE YOU ARE OPTIMIZING FOR
@@ -318,6 +329,12 @@ def overmind_user_prompt(state: dict) -> str:
     lines.append("\nHALL OF FAME:")
     for i, rec in enumerate(s["leaders"], 1):
         lines.append(f"{i}. {rec['spec']['name']} (by {rec['spec'].get('author','?')}) :: {fmt_spec(rec['spec'])}\n   {fmt_metrics(rec['result'])}")
+    if s.get("combos"):
+        lines.append("\nBEST COMBOS (strategies traded together on one account, each on its own instrument):")
+        for c in s["combos"]:
+            names = " + ".join(f"{m['name']} [{m['instrument']} {m['timeframe']}m]" for m in c["members"])
+            lines.append(f"- {names} | size x{c['scale']} | fit {c['fitness']:.3f} | val pass within {c['fast_days']}d {c['val_fast']:.0%} | daily-P&L correlation {c['corr']:.2f}")
+        lines.append("Combos pass faster when members are profitable on different days (low correlation): steer drones toward strong strategies on instruments the leaders do not cover.")
     if s.get("memory"):
         lines.append("\nHIVE MEMORY:")
         lines += [f"- {m}" for m in s["memory"][-20:]]

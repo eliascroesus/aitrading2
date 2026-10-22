@@ -98,7 +98,8 @@ python -m hive
 
 | Number | What it means | Good |
 |---|---|---|
-| **Holdout** | Pass rate on the newest 20% of history, which the hive never selects on. This is the honest number. | the higher the better |
+| **Holdout ≤7d** | Share of challenge attempts passed within the target days (`PROP_TARGET_DAYS`, default 7) on the newest 20% of history, which the hive never selects on. This is the honest headline number. | the higher the better |
+| **Holdout 30d** | Share passed at all within a 30-day attempt. | |
 | **Luck** | Pass rate the same risk would get with zero edge, from volatility alone. | |
 | **Holdout − Luck** | The part of the pass rate that comes from real edge. | under 5 points = no edge; 10–20 = promising; 25+ = strong |
 | **Val pass vs Holdout** | A big gap means the strategy is partly memorising history. | gap under ~10 points |
@@ -107,7 +108,9 @@ python -m hive
 
 Before paying for a real challenge, deploy the candidate to Alpaca paper and let the virtual challenge run for a few weeks.
 
-Passing fast and passing reliably pull against each other. Hitting +$3,000 in 3–7 days with a $2,000 trailing drawdown needs large daily swings, and large swings hit the drawdown more often. Set `PROP_TARGET_DAYS` (e.g. `10`) to make the hive optimise for passing within that many days, and expect lower pass rates the shorter you make it.
+**Goal: pass in 7 trading days.** By default the hive optimises for passing within `PROP_TARGET_DAYS=7` trading days, which means making about $430+ a day on average without touching the $2,000 trailing drawdown. Fast and reliable pull against each other: the shorter the target, the more daily swing it takes, and the more often an attempt fails. Set `PROP_TARGET_DAYS` to another number (or empty for the whole 30-day attempt) to change the goal.
+
+**Strategy combos.** Every ~45 seconds the hive combines leading strategies on *different* instruments into one account (for example a Nasdaq strategy plus a gold strategy), sizes them together, and scores the combo on the same 7-day challenge. Combos help when their members make money on different days (low correlation). They appear in their own panel and can be paper traded together with one click; each member trades its own ETF.
 
 ## How a strategy is judged
 

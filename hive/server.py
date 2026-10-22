@@ -30,7 +30,8 @@ class OrderIn(BaseModel):
 
 
 class DeployIn(BaseModel):
-    uid: str
+    uid: str | None = None
+    combo: str | None = None
 
 
 class LoginIn(BaseModel):
@@ -180,6 +181,13 @@ def create_app(cfg: Config) -> FastAPI:
         payload = {"exported": time.strftime("%Y-%m-%d %H:%M:%S"), "challenge": hive.rules.to_dict(), **rec}
         return JSONResponse(payload, headers={"Content-Disposition": f'attachment; filename="hivemind-{uid}.json"'})
 
+    @app.get("/api/combo/{key}")
+    async def api_combo(key: str):
+        c = await need_hive().combo_detail(key)
+        if c is None:
+            raise HTTPException(404, "unknown combo")
+        return c
+
     @app.post("/api/pause")
     async def api_pause():
         need_hive().pause()
@@ -220,11 +228,18 @@ def create_app(cfg: Config) -> FastAPI:
         hive = need_hive()
         if hive.paper is None:
             raise HTTPException(400, "Alpaca is not configured (set ALPACA_API_KEY / ALPACA_SECRET_KEY)")
-        rec = await hive.detail(body.uid)
-        if rec is None:
-            raise HTTPException(404, "unknown strategy")
+        if body.combo:
+            combo = await hive.combo_detail(body.combo)
+            if combo is None:
+                raise HTTPException(404, "unknown combo")
+            specs, scale = combo["members"], combo["result"]["scale"]
+        else:
+            rec = await hive.detail(body.uid or "")
+            if rec is None:
+                raise HTTPException(404, "unknown strategy")
+            specs, scale = [rec["spec"]], 1.0
         try:
-            await hive.paper.deploy(rec["spec"])
+            await hive.paper.deploy(specs, scale)
         except Exception as exc:
             raise HTTPException(400, str(exc)) from None
         return {"ok": True}

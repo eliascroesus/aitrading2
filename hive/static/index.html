@@ -45,12 +45,12 @@
         <div class="kpi-sub" id="k-rate">— / min</div>
       </div>
       <div class="kpi accent">
-        <div class="kpi-label">Best pass probability <span class="hint" title="Monte Carlo pass rate of the champion on the validation segment">validation</span></div>
+        <div class="kpi-label"><span id="k-val-label">Champion pass rate</span> <span class="hint" title="Monte Carlo pass rate of the champion on the validation segment">validation</span></div>
         <div class="kpi-value mono" id="k-val">—</div>
         <div class="kpi-sub" id="k-fit">fitness —</div>
       </div>
       <div class="kpi good">
-        <div class="kpi-label">Holdout pass rate <span class="hint" title="Data the hive never selects on. The honest estimate.">untouched</span></div>
+        <div class="kpi-label"><span id="k-test-label">Holdout pass rate</span> <span class="hint" title="Data the hive never selects on. The honest estimate.">untouched</span></div>
         <div class="kpi-value mono" id="k-test">—</div>
         <div class="kpi-sub" id="k-attempts">— attempts to pass</div>
       </div>
@@ -111,10 +111,10 @@
                 <th data-sort="instrument">Market</th>
                 <th data-sort="family">Family</th>
                 <th data-sort="score" title="Ranking score: fitness re-tested with nudged settings (✓ = robustness-checked)">Score</th>
-                <th data-sort="val_pass">Val pass</th>
-                <th data-sort="test_pass" title="Pass rate on the untouched holdout data">Holdout</th>
-                <th data-sort="test_luck" title="Holdout pass rate of the same risk with zero edge. Real edge = Holdout minus Luck.">Luck</th>
-                <th data-sort="test_fast" id="fast-th" title="Holdout: share of attempts passed within the fast-pass window">≤10d</th>
+                <th data-sort="val_fast" class="fast-label" title="Validation: share of attempts passed within the target days">Val ≤7d</th>
+                <th data-sort="test_fast" class="fast-label" title="Untouched holdout data: share of attempts passed within the target days">Holdout ≤7d</th>
+                <th data-sort="test_luck_fast" title="Holdout pass rate (within the target days) of the same risk with zero edge. Real edge = Holdout minus Luck.">Luck</th>
+                <th data-sort="test_pass" title="Holdout: share of attempts passed at all within the 30-day attempt">Holdout 30d</th>
                 <th data-sort="median_days">Days</th>
                 <th data-sort="trades">Trades</th>
                 <th data-sort="win_rate">Win</th>
@@ -138,6 +138,34 @@
           </div>
         </div>
         <div id="feed" class="feed"></div>
+      </article>
+
+      <article class="card span-12" id="combos-card">
+        <div class="card-head">
+          <h2>Strategy combos</h2>
+          <span class="muted small">Several strategies on one account, one per market, sized together. More trading days with positive P&amp;L = faster passes.</span>
+        </div>
+        <div class="table-wrap combos-wrap">
+          <table class="board">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th class="left">Strategies</th>
+                <th title="Common size multiplier applied to every member's risk">Size</th>
+                <th>Score</th>
+                <th class="fast-label">Val ≤7d</th>
+                <th class="fast-label">Holdout ≤7d</th>
+                <th title="Zero-edge luck baseline (holdout, within the target days)">Luck</th>
+                <th>Holdout 30d</th>
+                <th>Days</th>
+                <th title="Correlation of the members' daily P&amp;L (lower = better diversification)">Corr</th>
+                <th>Holdout net</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="combos"></tbody>
+          </table>
+        </div>
       </article>
 
       <article class="card span-6" id="paper-card">

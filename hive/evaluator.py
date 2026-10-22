@@ -90,13 +90,18 @@ def _seg_metrics(tr: backtest.Trades, day_rec: dict, d0: int, d1: int, rules: pr
         "pass_mc": mc["pass"],
         "pass_fast": mc["pass_fast"],
         "pass_hist": hist["pass"],
-        "luck": propfirm.luck_baseline(rules, days, rng),
+        **_luck_fields(rules, days, rng),
         "fail_maxloss": mc["fail_maxloss"],
         "fail_dll": mc["fail_dll"],
         "timeout": mc["timeout"],
         "median_days": mc["median_days"],
         "hist_median_days": hist["median_days"],
     }
+
+
+def _luck_fields(rules: propfirm.PropRules, days: dict, rng: np.random.Generator) -> dict:
+    luck = propfirm.luck_baseline(rules, days, rng)
+    return {"luck": luck["pass"], "luck_fast": luck["pass_fast"]}
 
 
 def complexity(spec: StrategySpec) -> int:
@@ -143,6 +148,115 @@ def _equity_curve(ds: Dataset, day_pnl: np.ndarray, max_points: int = 260) -> li
     return [[int(ds.day_ts[i]), round(float(eq[i]), 2)] for i in idx]
 
 
+def _backtest_spec(spec: StrategySpec) -> tuple[Dataset, backtest.Trades, dict]:
+    key = f"{spec.instrument}_{spec.timeframe}"
+    ds = _DATASETS[key]
+    eng = engine_for(key)
+    inst = get_instrument(spec.instrument, _RATIOS)
+    sig_long = eng.signal(spec.long_entry) if spec.long_entry else None
+    sig_short = eng.signal(spec.short_entry) if spec.short_entry else None
+    sig_exit = eng.signal(spec.exit_when) if spec.exit_when else None
+    atr = eng.series("atr(14)")
+    swing_low = swing_high = None
+    if spec.stop_type == "swing":
+        n = int(spec.stop_value)
+        swing_low = eng.series(f"lowest(low, {n})")
+        swing_high = eng.series(f"highest(high, {n})")
+    trades = backtest.run(ds, inst, spec, sig_long, sig_short, sig_exit, atr, swing_low, swing_high,
+                          max_contracts=_RULES.max_contracts)
+    return ds, trades, backtest.daily_records(trades, ds.n_days)
+
+
+def _day_seg_metrics(day: dict, d0: int, d1: int, rules: propfirm.PropRules, rng: np.random.Generator) -> dict:
+    """Challenge metrics for a slice of combined daily records (used for strategy combos)."""
+    days = {k: v[d0:d1] for k, v in day.items()}
+    dp = days["pnl"]
+    trades = int(days["count"].sum())
+    net = float(dp.sum())
+    equity = np.concatenate([[0.0], np.cumsum(dp)])
+    mc = propfirm.pass_probability_mc(rules, days, rng, sims=_MC_SIMS)
+    hist = propfirm.pass_probability_hist(rules, days)
+    traded = days["count"] > 0
+    return {
+        "days": int(d1 - d0), "trades": trades, "net": net,
+        "expectancy": net / trades if trades else 0.0,
+        "win_days": float((dp[traded] > 0).mean()) if traded.any() else 0.0,
+        "max_dd": float(np.max(np.maximum.accumulate(equity) - equity)) if len(dp) else 0.0,
+        "worst_day": float(dp.min()) if len(dp) else 0.0, "best_day": float(dp.max()) if len(dp) else 0.0,
+        "pass_mc": mc["pass"], "pass_fast": mc["pass_fast"], "pass_hist": hist["pass"],
+        "fail_maxloss": mc["fail_maxloss"], "fail_dll": mc["fail_dll"], "timeout": mc["timeout"],
+        "median_days": mc["median_days"], **_luck_fields(rules, days, rng),
+    }
+
+
+COMBO_SCALES = (0.4, 0.55, 0.7, 0.85, 1.0)
+
+
+def evaluate_combo(spec_dicts: list[dict]) -> dict:
+    """Score several strategies traded together on one account (each on its own instrument).
+
+    Daily results are added up (intraday lows are summed, which assumes the worst moments coincide),
+    then every member's size is scaled by a common factor; the scale with the best fitness is kept."""
+    try:
+        members = []
+        for d in spec_dicts:
+            spec = StrategySpec.from_dict(d)
+            errs = spec.errors()
+            if errs:
+                return {"ok": False, "error": "; ".join(errs)}
+            members.append((spec, *_backtest_spec(spec)))
+        dates = [(ds.day_ts // 86400).astype(np.int64) for _, ds, _, _ in members]
+        all_dates = np.unique(np.concatenate(dates))
+        n = len(all_dates)
+        parts = []
+        for (spec, ds, trades, rec), dd in zip(members, dates):
+            idx = np.searchsorted(all_dates, dd)
+            aligned = {k: np.zeros(n) for k in ("pnl", "low", "high")}
+            aligned["count"] = np.zeros(n, np.int64)
+            for k in aligned:
+                aligned[k][idx] = rec[k]
+            parts.append(aligned)
+        rules = _RULES
+        a, b = int(n * 0.6), int(n * 0.8)
+        edges = np.linspace(0, a, 4).astype(int)
+        fold_key = "pass_fast" if rules.target_days else "pass"
+        uid_key = "+".join(sorted(StrategySpec.from_dict(d).uid for d in spec_dicts))
+        best = None
+        for scale in COMBO_SCALES:
+            rng = np.random.default_rng(zlib.crc32(f"{uid_key}:{scale}".encode()))
+            day = {k: scale * sum(p[k] for p in parts) for k in ("pnl", "low", "high")}
+            day["count"] = sum(p["count"] for p in parts)
+            segs = {"train": _day_seg_metrics(day, 0, a, rules, rng), "val": _day_seg_metrics(day, a, b, rules, rng),
+                    "test": _day_seg_metrics(day, b, n, rules, rng)}
+            folds = [propfirm.pass_probability_mc(rules, {k: v[x:y] for k, v in day.items()}, rng,
+                                                  sims=max(100, _MC_SIMS // 2))[fold_key]
+                     for x, y in zip(edges[:-1], edges[1:])]
+            fit = fitness(segs["train"], segs["val"], rules, folds)
+            if best is None or fit > best["fitness"]:
+                best = {"fitness": fit, "scale": scale, "folds": folds, **segs, "day": day}
+        traded = [p["pnl"][p["count"] > 0] for p in parts]
+        pnl_mat = np.vstack([p["pnl"] for p in parts])
+        corr = float(np.nanmean([np.corrcoef(pnl_mat[i], pnl_mat[j])[0, 1]
+                                 for i in range(len(parts)) for j in range(i + 1, len(parts))])) if len(parts) > 1 else 1.0
+        eq = np.cumsum(best.pop("day")["pnl"])
+        step = max(1, math.ceil(n / 260))
+        idx = np.unique(np.concatenate([np.arange(0, n, step), [n - 1]]))
+        return {
+            "ok": True, "key": uid_key, "members": [StrategySpec.from_dict(d).uid for d in spec_dicts],
+            "corr": corr if np.isfinite(corr) else 0.0, "fast_days": rules.fast_days,
+            "member_trades": [int(len(t)) for t in traded],
+            "equity": [[int(all_dates[i] * 86400), round(float(eq[i]), 2)] for i in idx],
+            "split_ts": [int(all_dates[a] * 86400) if a < n else None, int(all_dates[b] * 86400) if b < n else None],
+            **best,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def evaluate_combos(groups: list[list[dict]]) -> list[dict]:
+    return [evaluate_combo(g) for g in groups]
+
+
 def evaluate(spec_dict: dict) -> dict:
     """Evaluate one strategy. Never raises: errors come back as {'ok': False, 'error': ...}."""
     try:
@@ -154,22 +268,8 @@ def evaluate(spec_dict: dict) -> dict:
         key = f"{spec.instrument}_{spec.timeframe}"
         if key not in _DATASETS:
             return {"ok": False, "uid": uid, "error": f"no data loaded for {spec.instrument} {spec.timeframe}m (available: {', '.join(sorted(_DATASETS))})"}
-        ds = _DATASETS[key]
-        eng = engine_for(key)
-        inst = get_instrument(spec.instrument, _RATIOS)
         rules = _RULES
-        sig_long = eng.signal(spec.long_entry) if spec.long_entry else None
-        sig_short = eng.signal(spec.short_entry) if spec.short_entry else None
-        sig_exit = eng.signal(spec.exit_when) if spec.exit_when else None
-        atr = eng.series("atr(14)")
-        swing_low = swing_high = None
-        if spec.stop_type == "swing":
-            n = int(spec.stop_value)
-            swing_low = eng.series(f"lowest(low, {n})")
-            swing_high = eng.series(f"highest(high, {n})")
-        trades = backtest.run(ds, inst, spec, sig_long, sig_short, sig_exit, atr, swing_low, swing_high,
-                              max_contracts=rules.max_contracts)
-        day_rec = backtest.daily_records(trades, ds.n_days)
+        ds, trades, day_rec = _backtest_spec(spec)
         rng = np.random.default_rng(zlib.crc32(uid.encode()))
         segs = {name: _seg_metrics(trades, day_rec, *_segment_days(ds, name), rules, rng) for name in ("train", "val", "test")}
         d0, d1 = ds.splits["train"]

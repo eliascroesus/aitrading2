@@ -107,6 +107,7 @@ function onSnapshot(d) {
   renderChampion(d);
   renderAgents(d);
   renderBoard(d);
+  renderCombos(d);
   renderPaper(d);
   renderMemory(d);
   renderGrave(d);
@@ -146,17 +147,22 @@ function renderKpis(d) {
   const s = d.stats;
   $("#k-tested").textContent = compact(s.tested);
   $("#k-rate").textContent = `${compact(Math.round(s.rate_per_min))}/min · ${s.workers} workers · ${dur(s.elapsed)}`;
-  $("#k-val").textContent = pct(s.best_val_pass);
+  const fastMode = !!s.target_days;
+  $("#k-val-label").textContent = fastMode ? `Pass ≤${s.fast_days}d` : "Champion pass rate";
+  $("#k-test-label").textContent = fastMode ? `Holdout pass ≤${s.fast_days}d` : "Holdout pass rate";
+  $("#k-val").textContent = pct(fastMode ? s.best_val_fast : s.best_val_pass);
   $("#k-fit").textContent = `score ${num(s.best_fitness, 3)} · ${s.best_robust ? "✓ robust" : "robustness check pending"}${s.robust_queue ? ` · ${s.robust_queue} queued` : ""}`;
-  $("#k-test").textContent = pct(s.best_test_pass);
+  const headline = fastMode ? s.best_test_fast : s.best_test_pass;
+  $("#k-test").textContent = pct(headline);
   const fee = d.mode.rules.fee_usd || 0;
-  const luck = s.best_test_luck != null ? `luck ${pct(s.best_test_luck)} · ` : "";
-  const fast = s.best_test_fast != null ? `≤${s.fast_days}d ${pct(s.best_test_fast)} · ` : "";
-  if (s.best_test_pass > 0.001) {
-    const attempts = 1 / s.best_test_pass;
-    $("#k-attempts").textContent = `${luck}${fast}≈ ${attempts.toFixed(1)} tries${fee ? ` (~${money(attempts * fee)})` : ""}`;
+  const luckV = fastMode ? s.best_test_luck_fast : s.best_test_luck;
+  const luck = luckV != null ? `luck ${pct(luckV)} · ` : "";
+  const other = fastMode ? `30d ${pct(s.best_test_pass)} · ` : "";
+  if (headline > 0.001) {
+    const attempts = 1 / headline;
+    $("#k-attempts").textContent = `${luck}${other}≈ ${attempts.toFixed(1)} tries${fee ? ` (~${money(attempts * fee)})` : ""}`;
   } else {
-    $("#k-attempts").textContent = `${luck}no holdout passes yet`;
+    $("#k-attempts").textContent = `${luck}${other}no fast holdout passes yet`;
   }
   $("#k-agents").textContent = `${s.drones_alive}/${s.max_drones}`;
   $("#k-deaths").textContent = `drones alive · ${s.deaths} deleted`;
@@ -249,17 +255,17 @@ function renderBoard(d) {
       <td>${esc(r.instrument)} ${r.timeframe}m</td>
       <td><span class="fam">${esc(r.family.replace("_", " "))}</span></td>
       <td><span class="fitbar" title="${r.robust ? `robustness-checked; neighbours' median fitness ${num(r.robust_median, 3)}` : "robustness check pending"}">${r.robust ? '<b class="pos">✓</b>' : '<span class="muted">·</span>'} ${num(r.score, 3)}<span class="bar"><i style="width:${Math.max(2, r.score * 100)}%"></i></span></span></td>
-      <td class="warn">${pct(r.val_pass)}</td>
-      <td class="${r.test_pass >= 0.5 ? "pos" : r.test_pass < 0.15 ? "neg" : ""}">${pct(r.test_pass)}</td>
-      <td class="${r.test_luck != null && r.test_pass > r.test_luck + 0.1 ? "pos" : "muted"}">${pct(r.test_luck)}</td>
-      <td>${pct(r.test_fast)}</td>
+      <td class="warn">${pct(r.val_fast)}</td>
+      <td class="${r.test_fast >= 0.4 ? "pos" : r.test_fast < 0.1 ? "neg" : ""}">${pct(r.test_fast)}</td>
+      <td class="${r.test_luck_fast != null && r.test_fast > r.test_luck_fast + 0.1 ? "pos" : "muted"}">${pct(r.test_luck_fast)}</td>
+      <td>${pct(r.test_pass)}</td>
       <td>${r.median_days ? Math.round(r.median_days) : "—"}</td>
       <td>${r.trades}</td>
       <td>${pct(r.win_rate)}</td>
       <td>${num(r.pf, 2)}</td>
       <td class="${signCls(r.net)}">${money(r.net)}</td>
     </tr>`).join("") : `<tr><td colspan="14" class="left muted">No strategies yet.</td></tr>`;
-  if (d.stats.fast_days) $("#fast-th").textContent = `≤${d.stats.fast_days}d`;
+  if (d.stats.fast_days) $$(".fast-label").forEach((th) => (th.textContent = th.textContent.replace(/≤\d+d/, `≤${d.stats.fast_days}d`)));
   state.seenLeaders = now;
 }
 
@@ -278,6 +284,25 @@ function renderFeed() {
 }
 
 // ---------------------------------------------------------------- paper trading
+function renderCombos(d) {
+  const rows = d.combos || [];
+  $("#combos").innerHTML = rows.length ? rows.map((c, i) => `
+    <tr data-combo="${esc(c.key)}">
+      <td>${i + 1}</td>
+      <td class="left"><div class="members">${c.members.map((m) => `<span><span class="mk">${esc(m.instrument)} ${m.timeframe}m</span>${esc(m.name)}</span>`).join("")}</div></td>
+      <td>×${c.scale}</td>
+      <td>${num(c.fitness, 3)}</td>
+      <td class="warn">${pct(c.val_fast)}</td>
+      <td class="${c.test_fast >= 0.4 ? "pos" : c.test_fast < 0.1 ? "neg" : ""}">${pct(c.test_fast)}</td>
+      <td class="${c.test_luck_fast != null && c.test_fast > c.test_luck_fast + 0.1 ? "pos" : "muted"}">${pct(c.test_luck_fast)}</td>
+      <td>${pct(c.test_pass)}</td>
+      <td>${c.median_days ? Math.round(c.median_days) : "—"}</td>
+      <td>${num(c.corr, 2)}</td>
+      <td class="${signCls(c.test_net)}">${money(c.test_net)}</td>
+      <td><button class="btn small" data-deploy-combo="${esc(c.key)}" ${d.paper ? "" : "disabled title='Configure Alpaca keys first'"}>Paper trade</button></td>
+    </tr>`).join("") : `<tr><td colspan="12" class="left muted">Combos appear once there are good strategies on at least two different markets (checked every ~45 s).</td></tr>`;
+}
+
 function renderPaper(d) {
   const el = $("#paper");
   const badge = $("#paper-badge");
@@ -327,13 +352,16 @@ function renderPaper(d) {
         <div class="mini"><div class="l">Days traded</div><div class="v">${ch.days_traded ?? 0}</div></div>
         <div class="mini"><div class="l">Position</div><div class="v">${p.position ? `${esc(p.position.side)} ${p.position.qty}` : "flat"}</div></div>
       </div>
-      <div class="muted small">${esc(p.message || "")}</div>
-      <div class="trades-mini">${(p.trades || []).slice().reverse().map((t) => `<div><span>${hm(t.t)} ${esc(t.side)} ${t.shares} sh (~${t.contracts_equiv} ct)</span><span class="${signCls(t.pnl)}">${t.pnl == null ? "open" : money(t.pnl)}</span></div>`).join("")}</div>
+      <div class="muted small">${esc(p.message || "")}${p.combo_scale && p.combo_scale !== 1 ? ` · combo size ×${p.combo_scale}` : ""}</div>
+      <div class="legs">${(p.legs || []).map((l) => `<div class="leg"><span><b>${esc(l.proxy)}</b> ${esc(l.name)}</span><span class="lm">${l.position ? `${esc(l.position.side)} ${l.position.qty} · ${money(l.position.unrealized)}` : "flat"} · ${esc(l.message)}</span></div>`).join("")}</div>
+      <div class="trades-mini">${(p.trades || []).slice().reverse().map((t) => `<div><span>${hm(t.t)} ${esc(t.symbol || "")} ${esc(t.side)} ${t.shares} sh (~${t.contracts_equiv} ct)</span><span class="${signCls(t.pnl)}">${t.pnl == null ? "open" : money(t.pnl)}</span></div>`).join("")}</div>
       <div class="row" style="margin-top:10px"><button class="btn small danger" id="paper-stop">Stop & flatten</button></div>`;
   } else {
     const top = d.leaders[0];
-    html += `<div class="row"><span class="muted">No strategy deployed.</span>
-      ${top ? `<button class="btn small primary" id="paper-deploy-champ" data-uid="${top.uid}">Deploy champion: ${esc(top.name)}</button>` : ""}</div>`;
+    const combo = (d.combos || [])[0];
+    html += `<div class="row"><span class="muted">Nothing deployed.</span>
+      ${combo ? `<button class="btn small primary" data-deploy-combo="${esc(combo.key)}">Deploy best combo (${combo.members.length} strategies)</button>` : ""}
+      ${top ? `<button class="btn small ${combo ? "" : "primary"}" id="paper-deploy-champ" data-uid="${top.uid}">Deploy champion: ${esc(top.name)}</button>` : ""}</div>`;
   }
   el.innerHTML = html;
 }
@@ -512,6 +540,42 @@ async function openDrawer(uid) {
     $("#d-body").innerHTML = `<div class="ev error">${esc(e.message)}</div>`;
   }
 }
+async function openComboDrawer(key) {
+  state.drawerUid = `combo:${key}`;
+  $("#drawer").classList.add("open");
+  $("#scrim").classList.add("open");
+  $("#d-title").textContent = "Loading…";
+  $("#d-kicker").textContent = "";
+  $("#d-body").innerHTML = `<div class="empty">Loading combo…</div>`;
+  try {
+    const c = await api(`/api/combo/${encodeURIComponent(key)}`);
+    if (state.drawerUid !== `combo:${key}`) return;
+    const r = c.result;
+    $("#d-kicker").textContent = `${c.members.length}-strategy combo · size ×${r.scale} · daily correlation ${num(r.corr, 2)}`;
+    $("#d-title").textContent = c.members.map((m) => m.instrument).join(" + ");
+    const segs = [["Train", r.train, ""], ["Validation", r.val, ""], ["Holdout", r.test, "hold"]];
+    $("#d-body").innerHTML = `
+      <div class="drawer-actions"><button class="btn primary small" data-deploy-combo="${esc(key)}" ${state.snap?.paper ? "" : "disabled"}>Paper trade this combo</button></div>
+      <div><div class="section-title">Members (each risk_usd is multiplied by ${r.scale})</div>
+        <div class="rules">${c.members.map((m) => `<div class="rule" data-open-uid="${m.uid}" style="cursor:pointer"><div class="k">${esc(m.instrument)} ${m.timeframe}m · ${esc(m.family)} · risk $${Math.round(m.risk_usd * r.scale)}</div><code>${esc(m.name)}</code></div>`).join("")}</div></div>
+      <div><div class="section-title">Challenge simulation (${esc(state.snap?.mode.rules_name || "")})</div>
+      <table class="seg-table">
+        <tr><th>Segment</th><th>≤${r.fast_days}d</th><th>Luck</th><th>30d</th><th>Trades</th><th>Win days</th><th>Net</th><th>Max DD</th><th>Days to pass</th></tr>
+        ${segs.map(([n, m, cls]) => `<tr class="${cls}"><td>${n}${cls ? " ✓ untouched" : ""}${n === "Train" && r.folds ? `<div class="muted small">folds ${r.folds.map((f) => pct(f)).join(" / ")}</div>` : ""}</td><td>${pct(m.pass_fast)}</td><td>${pct(m.luck_fast)}</td><td>${pct(m.pass_mc)}</td><td>${m.trades}</td><td>${pct(m.win_days)}</td><td class="${signCls(m.net)}">${money(m.net)}</td><td>${money(m.max_dd)}</td><td>${m.median_days ? Math.round(m.median_days) : "—"}</td></tr>`).join("")}
+      </table></div>
+      <div><div class="section-title">Combined equity curve</div><div class="eq-box"><canvas id="eq-chart"></canvas></div></div>`;
+    state._drawerRec = c;
+    drawEquity($("#eq-chart"), c);
+  } catch (e) {
+    $("#d-body").innerHTML = `<div class="ev error">${esc(e.message)}</div>`;
+  }
+}
+
+async function deployCombo(key) {
+  if (!confirm("Paper trade this combo on Alpaca? Anything currently deployed is stopped and flattened first.")) return;
+  try { await api("/api/paper/deploy", { combo: key }); toast("Combo deployed to Alpaca paper"); } catch (err) { toast(err.message, 4000); }
+}
+
 function closeDrawer() {
   state.drawerUid = null;
   $("#drawer").classList.remove("open");
@@ -643,6 +707,14 @@ function bind() {
       if (state.openAgents.has(id)) state.openAgents.delete(id); else state.openAgents.add(id);
       card.classList.toggle("open");
     }
+  });
+  document.addEventListener("click", (e) => {
+    const dep = e.target.closest("[data-deploy-combo]");
+    if (dep) { e.stopPropagation(); deployCombo(dep.dataset.deployCombo); return; }
+    const member = e.target.closest("[data-open-uid]");
+    if (member) { openDrawer(member.dataset.openUid); return; }
+    const row = e.target.closest("tr[data-combo]");
+    if (row) openComboDrawer(row.dataset.combo);
   });
   $("#paper").addEventListener("click", async (e) => {
     if (e.target.id === "paper-stop") {

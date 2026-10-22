@@ -80,7 +80,7 @@ PRESETS: dict[str, PropRules] = {
 
 def get_rules(key: str) -> PropRules:
     rules = _base_rules(key)
-    target = os.getenv("PROP_TARGET_DAYS", "").strip()
+    target = os.getenv("PROP_TARGET_DAYS", "7").strip()  # default goal: pass within 7 trading days; empty = whole attempt
     if target:
         rules = replace(rules, target_days=max(1, min(int(target), rules.horizon_days)))
     return rules
@@ -205,16 +205,17 @@ def pass_probability_mc(rules: PropRules, day: dict[str, np.ndarray], rng: np.ra
     return _summarise(st, dtp, fb, rules)
 
 
-def luck_baseline(rules: PropRules, day: dict[str, np.ndarray], rng: np.random.Generator, sims: int = 300) -> float:
-    """Pass rate of the same day-to-day risk with the edge removed (each trading day shifted by minus the
-    average trading-day P&L). A strategy only has a real edge if it beats this number."""
+def luck_baseline(rules: PropRules, day: dict[str, np.ndarray], rng: np.random.Generator, sims: int = 300) -> dict:
+    """Pass rates (whole attempt and within the fast window) of the same day-to-day risk with the edge
+    removed: each trading day is shifted by minus the average trading-day P&L. Real edge = pass - luck."""
     traded = day["count"] > 0
     if not traded.any():
-        return 0.0
+        return {"pass": 0.0, "pass_fast": 0.0}
     mu = float(day["pnl"][traded].mean())
     shift = np.where(traded, mu, 0.0)
     flat = {"pnl": day["pnl"] - shift, "low": day["low"] - shift, "high": day["high"] - shift, "count": day["count"]}
-    return pass_probability_mc(rules, flat, rng, sims=sims)["pass"]
+    res = pass_probability_mc(rules, flat, rng, sims=sims)
+    return {"pass": res["pass"], "pass_fast": res["pass_fast"]}
 
 
 def pass_probability_hist(rules: PropRules, day: dict[str, np.ndarray]) -> dict:

@@ -1,11 +1,12 @@
-"""Alpaca paper trading: run a hive strategy live and track a virtual prop-firm challenge on its P&L.
+"""Alpaca paper trading: run one strategy or a combo live and track a virtual prop-firm challenge.
 
-Alpaca has no futures, so the strategy trades the ETF proxy (QQQ for MNQ/NQ,
-SPY for MES/ES, GLD for MGC/GC ...).  Share quantity is chosen so one futures
-contract maps to ``proxy_ratio x point_value`` shares, which gives the same
-dollar P&L per point as the contract.  The challenge (profit target, trailing
-max loss, daily loss limit ...) is simulated on account equity relative to the
-equity at deployment, divided by PAPER_SIZE_SCALE.
+Alpaca has no futures, so each strategy trades its instrument's ETF proxy (QQQ for MNQ/NQ,
+SPY for MES/ES, GLD for MGC/GC ...).  Share quantity is chosen so one futures contract maps
+to ``proxy_ratio x point_value`` shares, which gives the same dollar P&L per point as the
+contract.  A combo runs several strategies at once, one per instrument (and so one per
+symbol).  The challenge (profit target, trailing max loss, daily loss limit ...) is simulated
+on the whole account's equity relative to the equity at deployment, divided by
+PAPER_SIZE_SCALE.  Use a dedicated paper account.
 """
 from __future__ import annotations
 
@@ -25,6 +26,24 @@ from .strategy import StrategySpec
 log = logging.getLogger("hive.paper")
 
 
+class Leg:
+    """One strategy of the deployment, trading one ETF proxy."""
+
+    def __init__(self, spec: StrategySpec, inst: Instrument):
+        self.spec = spec
+        self.inst = inst
+        self.last_bar_ts: int | None = None
+        self.day_trades = 0
+        self.position: dict | None = None
+        self.open_trade: dict | None = None
+        self.message = "waiting"
+
+    def to_dict(self) -> dict:
+        return {"name": self.spec.name, "uid": self.spec.uid, "instrument": self.inst.symbol, "proxy": self.inst.proxy,
+                "position": self.position, "message": self.message, "day_trades": self.day_trades,
+                "risk_usd": self.spec.risk_usd}
+
+
 class PaperTrader:
     def __init__(self, cfg, rules: propfirm.PropRules, instruments: dict[str, Instrument], bus, store):
         from alpaca.data.historical import StockHistoricalDataClient
@@ -38,38 +57,38 @@ class PaperTrader:
         self.trading = TradingClient(cfg.alpaca_key, cfg.alpaca_secret, paper=cfg.alpaca_paper)
         self.data = StockHistoricalDataClient(cfg.alpaca_key, cfg.alpaca_secret)
         self.scale = max(cfg.paper_scale, 1e-6)
-        self.spec: StrategySpec | None = None
+        self.legs: list[Leg] = []
+        self.combo_scale = 1.0
         self.task: asyncio.Task | None = None
         self.account: dict = {}
-        self.error: str = ""
-        self.message: str = "idle"
-        self.trades: deque = deque(maxlen=50)
-        self.position: dict | None = None
+        self.error = ""
+        self.message = "idle"
+        self.trades: deque = deque(maxlen=60)
         self.challenge: dict = {}
         self.days: list[dict] = []
-        self._last_bar_ts: int | None = None
         self._day: str | None = None
-        self._day_trades = 0
         self._day_start_equity = 0.0
         self._day_low = 0.0
         self._day_high = 0.0
-        self._entry_equity = None
         saved = store.kv_get("paper_state")
-        if saved and saved.get("spec"):
+        if saved and saved.get("legs"):
             self._restore(saved)
 
     # ------------------------------------------------------------------ status
     def status(self) -> dict:
+        first = self.legs[0] if self.legs else None
         return {
             "connected": bool(self.account) and not self.error,
             "paper": self.cfg.alpaca_paper,
             "account": self.account,
             "error": self.error,
             "message": self.message,
-            "deployed": self.spec.to_dict() if self.spec else None,
-            "proxy": self.instruments[self.spec.instrument].proxy if self.spec else None,
-            "position": self.position,
-            "trades": list(self.trades)[-20:],
+            "deployed": {"name": " + ".join(l.spec.name for l in self.legs)} if self.legs else None,
+            "legs": [l.to_dict() for l in self.legs],
+            "combo_scale": self.combo_scale,
+            "proxy": ", ".join(l.inst.proxy for l in self.legs) if self.legs else None,
+            "position": first.position if first and len(self.legs) == 1 else None,
+            "trades": list(self.trades)[-25:],
             "challenge": self.challenge,
             "days": self.days[-40:],
             "scale": self.scale,
@@ -91,47 +110,56 @@ class PaperTrader:
             self.error = f"Alpaca account error: {exc}"
 
     # ------------------------------------------------------------------ control
-    async def deploy(self, spec_dict: dict) -> None:
+    async def deploy(self, spec_dicts: list[dict], scale: float = 1.0) -> None:
+        legs = []
+        for d in spec_dicts:
+            spec = StrategySpec.from_dict(d, list(self.instruments), None)
+            spec.risk_usd = round(spec.risk_usd * scale, 0)
+            legs.append(Leg(spec, self.instruments[spec.instrument]))
+        proxies = [l.inst.proxy for l in legs]
+        if len(set(proxies)) != len(proxies):
+            raise RuntimeError("each strategy in a combo needs its own instrument")
         await self.stop(flatten=True)
         await self.refresh_account()
         if self.error:
             raise RuntimeError(self.error)
-        self.spec = StrategySpec.from_dict(spec_dict, list(self.instruments), None)
-        base = self.account["equity"]
+        self.legs = legs
+        self.combo_scale = scale
         rules = self.rules
         self.challenge = {
-            "status": "active", "start_equity": base, "balance": rules.start_balance, "pnl": 0.0,
+            "status": "active", "start_equity": self.account["equity"], "balance": rules.start_balance, "pnl": 0.0,
             "peak": rules.start_balance, "floor": rules.start_balance - rules.max_loss,
             "target": rules.start_balance + rules.profit_target, "best_day": 0.0, "days_traded": 0,
             "started": time.time(), "today_pnl": 0.0, "fail_reason": "",
         }
         self.days = []
         self._day = None
-        self._last_bar_ts = None
         self.trades.clear()
         self._persist()
-        self.bus.emit("paper", f"Deployed '{self.spec.name}' to Alpaca {'paper' if self.cfg.alpaca_paper else 'LIVE'} on {self.instruments[self.spec.instrument].proxy}; virtual {rules.name} started.")
+        what = " + ".join(f"'{l.spec.name}' on {l.inst.proxy}" for l in legs)
+        self.bus.emit("paper", f"Deployed {what} to Alpaca {'paper' if self.cfg.alpaca_paper else 'LIVE'} (size x{scale}); virtual {rules.name} started.")
         self.task = asyncio.create_task(self._loop(), name="paper")
 
     async def stop(self, flatten: bool = True) -> None:
         if self.task:
             self.task.cancel()
             self.task = None
-        if flatten and self.spec:
-            await self._flatten("strategy stopped")
-        if self.spec:
-            self.bus.emit("paper", f"Paper trading of '{self.spec.name}' stopped.")
-        self.spec = None
+        if flatten:
+            for leg in self.legs:
+                await self._flatten(leg, "strategy stopped")
+        if self.legs:
+            self.bus.emit("paper", "Paper trading stopped.")
+        self.legs = []
         self.message = "idle"
         self._persist()
 
     def resume_if_deployed(self) -> None:
-        if self.spec and not self.task:
+        if self.legs and not self.task:
             self.task = asyncio.create_task(self._loop(), name="paper")
 
     # ------------------------------------------------------------------ main loop
     async def _loop(self) -> None:
-        while self.spec:
+        while self.legs:
             try:
                 await self._tick()
             except asyncio.CancelledError:
@@ -148,67 +176,72 @@ class PaperTrader:
         if not clock.is_open:
             self.message = f"market closed, next open {clock.next_open.astimezone(timezone.utc):%Y-%m-%d %H:%M} UTC"
             return
-        spec = self.spec
-        inst = self.instruments[spec.instrument]
         now_ny = datetime.now(timezone.utc).astimezone(_ny_tz())
-        today = now_ny.strftime("%Y-%m-%d")
-        tod_now = now_ny.hour * 60 + now_ny.minute
-        equity = self.account.get("equity", 0.0)
-        self._update_challenge(today, equity)
+        self._update_challenge(now_ny.strftime("%Y-%m-%d"), self.account.get("equity", 0.0))
         if self.challenge.get("status") != "active":
             self.message = f"challenge {self.challenge['status']}: trading halted"
-            if self.position:
-                await self._flatten("challenge finished")
+            for leg in self.legs:
+                if leg.position:
+                    await self._flatten(leg, "challenge finished")
             return
+        self.message = "running"
+        for leg in self.legs:
+            try:
+                await self._tick_leg(leg, now_ny)
+            except Exception as exc:
+                leg.message = f"error: {exc}"
+                log.exception("leg %s failed", leg.spec.name)
 
-        await self._sync_position(inst)
+    async def _tick_leg(self, leg: Leg, now_ny: datetime) -> None:
+        spec, inst = leg.spec, leg.inst
+        tod_now = now_ny.hour * 60 + now_ny.minute
+        await self._sync_position(leg)
         if tod_now >= spec.flat_at:
-            if self.position:
-                await self._flatten("flat_at reached")
-            self.message = "past flat time; flat until tomorrow"
+            if leg.position:
+                await self._flatten(leg, "flat_at reached")
+            leg.message = "past flat time; flat until tomorrow"
             return
-
         bars = await asyncio.to_thread(self._recent_bars, inst.proxy, spec.timeframe)
         if bars is None or bars.empty:
-            self.message = "waiting for bars"
+            leg.message = "waiting for bars"
             return
         ds = build_dataset(bars, inst, spec.timeframe, "alpaca-live", inst.proxy_ratio)
         i = ds.n - 1
         bar_ts = int(ds.ts[i])
-        if bar_ts == self._last_bar_ts:
-            self.message = f"watching {inst.proxy}: waiting for the next {spec.timeframe}m bar"
+        if bar_ts == leg.last_bar_ts:
             return
-        self._last_bar_ts = bar_ts
+        leg.last_bar_ts = bar_ts
         eng = lang.Engine(ds)
         long_sig = eng.signal(spec.long_entry) if spec.long_entry else None
         short_sig = eng.signal(spec.short_entry) if spec.short_entry else None
         exit_sig = eng.signal(spec.exit_when) if spec.exit_when else None
         atr = eng.series("atr(14)")
+        bar_time = datetime.fromtimestamp(bar_ts, timezone.utc).astimezone(_ny_tz())
 
-        if self.position:
+        if leg.position:
             if exit_sig is not None and exit_sig[i]:
-                await self._flatten("exit_when fired")
-            self.message = f"in position {self.position['side']} {self.position['qty']} {inst.proxy}"
+                await self._flatten(leg, "exit_when fired")
+            else:
+                leg.message = f"in position {leg.position['side']} {leg.position['qty']:g} {inst.proxy}"
             return
-
         side = 1 if (long_sig is not None and long_sig[i]) else (-1 if (short_sig is not None and short_sig[i]) else 0)
         if side == 0:
-            self.message = f"no signal on bar {datetime.fromtimestamp(bar_ts, timezone.utc).astimezone(_ny_tz()):%H:%M}"
+            leg.message = f"no signal on the {bar_time:%H:%M} bar"
             return
         if not (spec.session_start <= tod_now < spec.session_end):
-            self.message = "signal outside session window"
+            leg.message = "signal outside session window"
             return
-        if self._day_trades >= spec.max_trades_per_day:
-            self.message = "max trades for today reached"
+        if leg.day_trades >= spec.max_trades_per_day:
+            leg.message = "max trades for today reached"
             return
         today_pnl = self.challenge.get("today_pnl", 0.0)
         if spec.daily_loss_stop_usd and today_pnl <= -spec.daily_loss_stop_usd:
-            self.message = "daily loss stop reached"
+            leg.message = "daily loss stop reached"
             return
         if spec.daily_profit_stop_usd and today_pnl >= spec.daily_profit_stop_usd:
-            self.message = "daily profit stop reached"
+            leg.message = "daily profit stop reached"
             return
-        await self._enter(spec, inst, ds, i, side, atr)
+        await self._enter(leg, ds, i, side, atr)
 
     def _recent_bars(self, symbol: str, tf: int):
         from alpaca.data.enums import DataFeed
@@ -227,14 +260,13 @@ class PaperTrader:
         if df.index.tz is None:
             df.index = df.index.tz_localize("UTC")
         df = filter_rth(df)
-        # keep only completed bars
-        cutoff = end - timedelta(minutes=tf)
-        return df[df.index <= cutoff]
+        return df[df.index <= end - timedelta(minutes=tf)]  # completed bars only
 
-    async def _enter(self, spec: StrategySpec, inst: Instrument, ds, i: int, side: int, atr: np.ndarray) -> None:
+    async def _enter(self, leg: Leg, ds, i: int, side: int, atr: np.ndarray) -> None:
         from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
         from alpaca.trading.requests import MarketOrderRequest, StopLossRequest, TakeProfitRequest
 
+        spec, inst = leg.spec, leg.inst
         c = ds.c[i]
         if spec.stop_type == "atr":
             dist = spec.stop_value * atr[i]
@@ -247,12 +279,12 @@ class PaperTrader:
             ref = np.min(ds.l[max(0, i - n + 1): i + 1]) if side > 0 else np.max(ds.h[max(0, i - n + 1): i + 1])
             dist = abs(c - ref) + inst.tick_size
         if not np.isfinite(dist) or dist <= 0:
-            self.message = "invalid stop distance; skipped"
+            leg.message = "invalid stop distance; skipped"
             return
         contracts = int(spec.risk_usd // (dist * inst.point_value + inst.commission_rt))
         contracts = min(contracts, spec.max_contracts, int(self.rules.max_contracts / inst.mini_equiv + 1e-9))
         if contracts < 1:
-            self.message = "risk too small for 1 contract; skipped"
+            leg.message = "risk too small for 1 contract; skipped"
             return
         shares = int(round(contracts * inst.proxy_ratio * inst.point_value * self.scale))
         px = c / inst.proxy_ratio
@@ -260,50 +292,86 @@ class PaperTrader:
         if bp and shares * px > bp * 0.95:
             shares = int(bp * 0.95 / px)
         if shares < 1:
-            self.message = "not enough buying power; skipped"
+            leg.message = "not enough buying power; skipped"
             return
         stop_px = round((c - side * dist) / inst.proxy_ratio, 2)
         tgt_dist = {"r": spec.target_value * dist, "atr": spec.target_value * atr[i], "pct": spec.target_value / 100 * c,
                     "points": spec.target_value}.get(spec.target_type, 0.0)
         tgt_px = round((c + side * tgt_dist) / inst.proxy_ratio, 2) if tgt_dist and tgt_dist > 0 else None
-        kwargs = dict(
-            symbol=inst.proxy, qty=shares, side=OrderSide.BUY if side > 0 else OrderSide.SELL, time_in_force=TimeInForce.DAY,
-            stop_loss=StopLossRequest(stop_price=stop_px),
-        )
+        kwargs = dict(symbol=inst.proxy, qty=shares, side=OrderSide.BUY if side > 0 else OrderSide.SELL,
+                      time_in_force=TimeInForce.DAY, stop_loss=StopLossRequest(stop_price=stop_px))
         if tgt_px:
             kwargs.update(order_class=OrderClass.BRACKET, take_profit=TakeProfitRequest(limit_price=tgt_px))
         else:
             kwargs.update(order_class=OrderClass.OTO)
         order = await asyncio.to_thread(self.trading.submit_order, MarketOrderRequest(**kwargs))
-        self._day_trades += 1
-        self._entry_equity = self.account.get("equity")
-        rec = {"t": time.time(), "side": "long" if side > 0 else "short", "shares": shares, "contracts_equiv": contracts,
-               "ref_price": round(px, 2), "stop": stop_px, "target": tgt_px, "order_id": str(order.id), "pnl": None}
+        leg.day_trades += 1
+        rec = {"t": time.time(), "strategy": spec.name, "symbol": inst.proxy, "side": "long" if side > 0 else "short",
+               "shares": shares, "contracts_equiv": contracts, "ref_price": round(px, 2), "stop": stop_px, "target": tgt_px,
+               "order_id": str(order.id), "entry": None, "pnl": None}
+        leg.open_trade = rec
         self.trades.append(rec)
-        self.bus.emit("paper", f"PAPER {rec['side'].upper()} {shares} {inst.proxy} (~{contracts} {inst.symbol}) stop {stop_px} target {tgt_px or '-'}")
+        leg.message = f"entered {rec['side']} {shares} {inst.proxy}"
+        self.bus.emit("paper", f"PAPER {rec['side'].upper()} {shares} {inst.proxy} (~{contracts} {inst.symbol}) [{spec.name}] stop {stop_px} target {tgt_px or '-'}")
         self._persist()
 
-    async def _sync_position(self, inst: Instrument) -> None:
-        pos = None
+    async def _sync_position(self, leg: Leg) -> None:
+        symbol = leg.inst.proxy
         try:
-            p = await asyncio.to_thread(self.trading.get_open_position, inst.proxy)
-            pos = {"side": "long" if float(p.qty) > 0 else "short", "qty": abs(float(p.qty)), "avg": float(p.avg_entry_price),
-                   "unrealized": float(p.unrealized_pl)}
+            p = await asyncio.to_thread(self.trading.get_open_position, symbol)
+            pos = {"side": "long" if float(p.qty) > 0 else "short", "qty": abs(float(p.qty)),
+                   "avg": float(p.avg_entry_price), "unrealized": float(p.unrealized_pl)}
         except Exception:
             pos = None
-        if self.position and not pos and self.trades:
-            last = self.trades[-1]
-            if last.get("pnl") is None and self._entry_equity is not None:
-                last["pnl"] = round((self.account.get("equity", 0.0) - self._entry_equity) / self.scale, 2)
-                self.bus.emit("paper", f"PAPER trade closed: {last['side']} result ${last['pnl']:,.2f} (challenge units)")
-        self.position = pos
+        trade = leg.open_trade
+        if pos and trade and trade.get("entry") is None:
+            trade["entry"] = pos["avg"]
+        if leg.position and not pos and trade and trade.get("pnl") is None:
+            exit_px = await asyncio.to_thread(self._last_exit_fill, symbol, trade["side"])
+            if exit_px and trade.get("entry"):
+                sign = 1 if trade["side"] == "long" else -1
+                trade["pnl"] = round(sign * (exit_px - trade["entry"]) * trade["shares"] / self.scale, 2)
+            else:
+                trade["pnl"] = round(leg.position.get("unrealized", 0.0) / self.scale, 2)
+            leg.open_trade = None
+            self.bus.emit("paper", f"PAPER trade closed [{leg.spec.name}]: {trade['side']} {symbol} ${trade['pnl']:,.2f} (challenge units)")
+            self._persist()
+        leg.position = pos
 
-    async def _flatten(self, why: str) -> None:
+    def _last_exit_fill(self, symbol: str, side: str) -> float | None:
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
         try:
-            await asyncio.to_thread(self.trading.close_all_positions, True)  # dedicated paper account assumed
-            self.bus.emit("paper", f"Flattened paper account ({why}).")
+            orders = self.trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.CLOSED, symbols=[symbol], limit=20, nested=True))
+        except Exception:
+            return None
+        exit_side = "sell" if side == "long" else "buy"
+        fills = []
+        for o in orders or []:
+            for x in [o, *(getattr(o, "legs", None) or [])]:
+                when = getattr(x, "filled_at", None) or getattr(x, "updated_at", None)
+                if when and getattr(x, "filled_avg_price", None) and str(getattr(x, "side", "")).lower().endswith(exit_side):
+                    fills.append((when, float(x.filled_avg_price)))
+        return max(fills)[1] if fills else None
+
+    async def _flatten(self, leg: Leg, why: str) -> None:
+        """Cancel this strategy's open orders and close its position (other strategies are untouched)."""
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        symbol = leg.inst.proxy
+        try:
+            open_orders = await asyncio.to_thread(
+                self.trading.get_orders, GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol], nested=True))
+            for o in open_orders or []:
+                await asyncio.to_thread(self.trading.cancel_order_by_id, o.id)
+            if leg.position:
+                await asyncio.sleep(0.5)
+                await asyncio.to_thread(self.trading.close_position, symbol)
+            self.bus.emit("paper", f"Flattened {symbol} [{leg.spec.name}] ({why}).")
         except Exception as exc:
-            self.bus.emit("error", f"Paper flatten failed: {exc}", persist=False)
+            self.bus.emit("error", f"Paper flatten of {symbol} failed: {exc}", persist=False)
 
     # ------------------------------------------------------------------ virtual challenge
     def _update_challenge(self, today: str, equity: float) -> None:
@@ -316,7 +384,8 @@ class PaperTrader:
             if self._day is not None:
                 self._close_day()
             self._day = today
-            self._day_trades = 0
+            for leg in self.legs:
+                leg.day_trades = 0
             self._day_start_equity = equity
             self._day_low = self._day_high = 0.0
         day_pnl = (equity - self._day_start_equity) / self.scale
@@ -326,7 +395,6 @@ class PaperTrader:
         ch["pnl"] = round(pnl_total, 2)
         ch["balance"] = round(bal, 2)
         ch["today_pnl"] = round(day_pnl, 2)
-        # live checks
         if rules.trailing == "intraday":
             ch["peak"] = max(ch["peak"], bal)
             floor = ch["peak"] - rules.max_loss
@@ -342,9 +410,10 @@ class PaperTrader:
     def _close_day(self) -> None:
         ch, rules = self.challenge, self.rules
         day_pnl = ch.get("today_pnl", 0.0)
+        traded = sum(l.day_trades for l in self.legs)
         self.days.append({"day": self._day, "pnl": day_pnl, "low": round(self._day_low, 2), "high": round(self._day_high, 2),
-                          "trades": self._day_trades})
-        if self._day_trades:
+                          "trades": traded})
+        if traded:
             ch["days_traded"] += 1
         ch["best_day"] = max(ch["best_day"], day_pnl)
         bal = ch["balance"]
@@ -356,27 +425,32 @@ class PaperTrader:
         cons_ok = not rules.consistency_pct or ch["best_day"] <= rules.consistency_pct * profit
         if profit >= rules.profit_target and ch["days_traded"] >= rules.min_days and cons_ok:
             ch["status"] = "passed"
-            self.bus.emit("champion", f"Virtual {rules.name} PASSED on Alpaca paper with '{self.spec.name}' after {len(self.days)} days!")
+            names = " + ".join(l.spec.name for l in self.legs)
+            self.bus.emit("champion", f"Virtual {rules.name} PASSED on Alpaca paper with {names} after {len(self.days)} days!")
 
     def _persist(self) -> None:
         self.store.kv_set("paper_state", {
-            "spec": self.spec.to_dict() if self.spec else None, "challenge": self.challenge, "days": self.days,
-            "trades": list(self.trades), "day": self._day, "day_start_equity": self._day_start_equity,
-            "day_trades": self._day_trades,
+            "legs": [l.spec.to_dict() for l in self.legs], "combo_scale": self.combo_scale,
+            "challenge": self.challenge, "days": self.days, "trades": list(self.trades), "day": self._day,
+            "day_start_equity": self._day_start_equity, "day_trades": [l.day_trades for l in self.legs],
         })
 
     def _restore(self, saved: dict) -> None:
-        self.spec = StrategySpec.from_dict(saved["spec"], list(self.instruments), None)
+        for d in saved["legs"]:
+            spec = StrategySpec.from_dict(d, list(self.instruments), None)
+            if spec.instrument in self.instruments:
+                self.legs.append(Leg(spec, self.instruments[spec.instrument]))
+        for leg, n in zip(self.legs, saved.get("day_trades") or []):
+            leg.day_trades = n
+        self.combo_scale = saved.get("combo_scale", 1.0)
         self.challenge = saved.get("challenge") or {}
         self.days = saved.get("days") or []
         self.trades.extend(saved.get("trades") or [])
         self._day = saved.get("day")
         self._day_start_equity = saved.get("day_start_equity") or 0.0
-        self._day_trades = saved.get("day_trades") or 0
 
 
 def _ny_tz():
     from zoneinfo import ZoneInfo
 
     return ZoneInfo(NY)
-

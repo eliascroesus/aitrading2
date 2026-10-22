@@ -113,6 +113,8 @@ class Hive:
             self.last_cycle_best = score(self.best)
         self.robust_queue: list = []
         self.robust_queued: set[str] = set()
+        self.combos: dict[str, dict] = {c["result"]["key"]: c for c in store.kv_get("combos", [])}
+        self.combo_tried: set[str] = set(self.combos)
         for a in store.load_agents():
             agent = ag.Agent(**{k: v for k, v in a.items() if k in ag.Agent.__dataclass_fields__})
             if agent.alive:
@@ -143,6 +145,7 @@ class Hive:
         self.tasks = [
             asyncio.create_task(self._evolver_loop(), name="evolver"),
             asyncio.create_task(self._robust_loop(), name="robustness"),
+            asyncio.create_task(self._combo_loop(), name="combos"),
             asyncio.create_task(self._overmind_loop(), name="overmind"),
             asyncio.create_task(self._housekeeping_loop(), name="housekeeping"),
         ]
@@ -318,6 +321,102 @@ class Hive:
             except Exception as exc:
                 log.exception("robustness check failed")
                 self.bus.emit("error", f"Robustness check error: {exc}", persist=False)
+
+    # ------------------------------------------------------------------ combos (several strategies on one account)
+    def _combo_candidates(self, n: int = 12) -> list[dict]:
+        out, niche = [], {}
+        for r in self.leaders(200):
+            key = (r["spec"]["family"], r["spec"]["instrument"])
+            if niche.get(key, 0) >= 2:
+                continue
+            niche[key] = niche.get(key, 0) + 1
+            out.append(r)
+            if len(out) >= n:
+                break
+        return out
+
+    def best_combos(self, n: int = 10) -> list[dict]:
+        return sorted(self.combos.values(), key=lambda c: c["result"]["fitness"], reverse=True)[:n]
+
+    async def _combo_loop(self) -> None:
+        """Every ~45 s: score pairs and triples of leading strategies on different instruments, traded together."""
+        await asyncio.sleep(20)
+        loop = asyncio.get_running_loop()
+        while not self.stopping:
+            await self.running.wait()
+            try:
+                cands = self._combo_candidates()
+                groups: list[list[dict]] = []
+                pairs = sorted(
+                    ((a, b) for i, a in enumerate(cands) for b in cands[i + 1:] if a["spec"]["instrument"] != b["spec"]["instrument"]),
+                    key=lambda p: -(score(p[0]) + score(p[1])),
+                )
+                for a, b in pairs:
+                    key = "+".join(sorted((a["spec"]["uid"], b["spec"]["uid"])))
+                    if key not in self.combo_tried:
+                        groups.append([a["spec"], b["spec"]])
+                    if len(groups) >= 12:
+                        break
+                for c in self.best_combos(4):  # grow the best pairs into triples
+                    members = c["members"]
+                    used = {m["instrument"] for m in members}
+                    for r in cands:
+                        if r["spec"]["instrument"] in used or len(members) >= 3:
+                            continue
+                        key = "+".join(sorted([m["uid"] for m in members] + [r["spec"]["uid"]]))
+                        if key not in self.combo_tried:
+                            groups.append([*members, r["spec"]])
+                            break
+                if groups:
+                    for g in groups:
+                        self.combo_tried.add("+".join(sorted(m["uid"] for m in g)))
+                    chunks = [groups[i:i + 2] for i in range(0, len(groups), 2)]
+                    outs = await asyncio.gather(*[loop.run_in_executor(self.pool, evaluator.evaluate_combos, c) for c in chunks])
+                    prev_best = self.best_combos(1)[0]["result"]["fitness"] if self.combos else 0.0
+                    for g, res in zip((g for c in chunks for g in c), (r for o in outs for r in o)):
+                        if res.get("ok"):
+                            self.combos[res["key"]] = {"members": g, "result": res, "t": time.time()}
+                    if len(self.combos) > 40:
+                        keep = self.best_combos(30)
+                        self.combos = {c["result"]["key"]: c for c in keep}
+                    top = self.best_combos(1)
+                    if top and top[0]["result"]["fitness"] > prev_best + 0.004:
+                        c, r = top[0], top[0]["result"]
+                        names = " + ".join(f"{m['name']} [{m['instrument']}]" for m in c["members"])
+                        self.bus.emit("champion", f"New best combo ({len(c['members'])} strategies, size x{r['scale']}): {names} | holdout pass within {r['fast_days']}d {r['test']['pass_fast']:.0%} (luck {r['test']['luck_fast']:.0%})", combo=r["key"])
+                    self.store.kv_set("combos", [{"members": c["members"], "result": c["result"]} for c in self.best_combos(15)])
+            except asyncio.CancelledError:
+                raise
+            except BrokenProcessPool:
+                await asyncio.sleep(5)
+            except Exception as exc:
+                log.exception("combo search failed")
+                self.bus.emit("error", f"Combo search error: {exc}", persist=False)
+            await asyncio.sleep(45)
+
+    async def combo_detail(self, key: str) -> dict | None:
+        c = self.combos.get(key)
+        if c is None:
+            return None
+        if "equity" not in c["result"]:
+            loop = asyncio.get_running_loop()
+            res = (await loop.run_in_executor(self.pool, evaluator.evaluate_combos, [c["members"]]))[0]
+            if res.get("ok"):
+                c["result"] = res
+        return c
+
+    @staticmethod
+    def combo_summary(c: dict) -> dict:
+        r = c["result"]
+        return {
+            "key": r["key"], "scale": r["scale"], "fitness": r["fitness"], "corr": r.get("corr"),
+            "members": [{"uid": m["uid"], "name": m["name"], "instrument": m["instrument"], "timeframe": m["timeframe"],
+                         "family": m["family"]} for m in c["members"]],
+            "val_fast": r["val"]["pass_fast"], "test_fast": r["test"]["pass_fast"], "test_pass": r["test"]["pass_mc"],
+            "test_luck_fast": r["test"].get("luck_fast"), "median_days": r["val"]["median_days"],
+            "test_median_days": r["test"]["median_days"], "fast_days": r.get("fast_days"),
+            "trades": r["train"]["trades"] + r["val"]["trades"] + r["test"]["trades"], "test_net": r["test"]["net"],
+        }
 
     def leaders(self, n: int = 25, diverse: bool = False) -> list[dict]:
         ranked = sorted(self.records.values(), key=score, reverse=True)
@@ -574,6 +673,7 @@ class Hive:
             "graveyard": [f"{g['name']} ({g['death_reason']})" for g in self.graveyard if g["kind"] == "drone"],
             "niches": niches,
             "leaders": self.leaders(10, diverse=True),
+            "combos": [self.combo_summary(c) for c in self.best_combos(3)],
             "memory": self.memory,
             "directive": self.directive,
             "max_drones": self.cfg.max_drones,
@@ -713,6 +813,7 @@ class Hive:
             "robust_median": (r.get("robust") or {}).get("median"),
             "train_pass": r["train"]["pass_mc"], "val_pass": r["val"]["pass_mc"], "test_pass": r["test"]["pass_mc"],
             "test_luck": r["test"].get("luck"), "test_fast": r["test"].get("pass_fast"), "fast_days": r.get("fast_days", 10),
+            "val_fast": r["val"].get("pass_fast"), "test_luck_fast": r["test"].get("luck_fast"),
             "test_hist_pass": r["test"]["pass_hist"], "median_days": r["val"]["median_days"],
             "trades": r["trades"], "win_rate": (r["train"]["win_rate"] + r["val"]["win_rate"]) / 2,
             "pf": min(r["val"]["profit_factor"], 99.0), "net": r["train"]["net"] + r["val"]["net"], "test_net": r["test"]["net"],
@@ -744,6 +845,8 @@ class Hive:
                 "best_test_pass": best["test"]["pass_mc"] if best else 0.0,
                 "best_test_luck": best["test"].get("luck") if best else None,
                 "best_test_fast": best["test"].get("pass_fast") if best else None,
+                "best_val_fast": best["val"].get("pass_fast") if best else None,
+                "best_test_luck_fast": best["test"].get("luck_fast") if best else None,
                 "fast_days": self.rules.fast_days, "target_days": self.rules.target_days,
                 "robust_queue": len(self.robust_queue),
                 "best_uid": self.best["spec"]["uid"] if self.best else None,
@@ -763,6 +866,7 @@ class Hive:
             "agents": [a.to_dict() for a in sorted(self.agents.values(), key=lambda a: (a.kind != "overmind", a.born))],
             "graveyard": list(reversed(self.graveyard[-30:])),
             "leaders": [self.summary(r) for r in self.leaders(60)],
+            "combos": [self.combo_summary(c) for c in self.best_combos(10)],
             "history": hist,
             "scatter": list(self.scatter)[::2] if len(self.scatter) > 1200 else list(self.scatter),
             "memory": self.memory[-30:],
