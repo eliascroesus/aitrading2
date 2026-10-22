@@ -37,6 +37,14 @@ class Leg:
         self.position: dict | None = None
         self.open_trade: dict | None = None
         self.message = "waiting"
+        self.crypto = inst.asset_class == "crypto"
+        # crypto on Alpaca has no bracket orders: the trader watches stop/target itself
+        self.stop_px: float | None = None
+        self.target_px: float | None = None
+
+    @property
+    def position_symbol(self) -> str:
+        return self.inst.proxy.replace("/", "")  # positions API uses BTCUSD, orders use BTC/USD
 
     def to_dict(self) -> dict:
         return {"name": self.spec.name, "uid": self.spec.uid, "instrument": self.inst.symbol, "proxy": self.inst.proxy,
@@ -46,7 +54,7 @@ class Leg:
 
 class PaperTrader:
     def __init__(self, cfg, rules: propfirm.PropRules, instruments: dict[str, Instrument], bus, store):
-        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
         from alpaca.trading.client import TradingClient
 
         self.cfg = cfg
@@ -56,6 +64,7 @@ class PaperTrader:
         self.store = store
         self.trading = TradingClient(cfg.alpaca_key, cfg.alpaca_secret, paper=cfg.alpaca_paper)
         self.data = StockHistoricalDataClient(cfg.alpaca_key, cfg.alpaca_secret)
+        self.crypto_data = CryptoHistoricalDataClient(cfg.alpaca_key, cfg.alpaca_secret)
         self.scale = max(cfg.paper_scale, 1e-6)
         self.legs: list[Leg] = []
         self.combo_scale = 1.0
@@ -196,6 +205,14 @@ class PaperTrader:
         spec, inst = leg.spec, leg.inst
         tod_now = now_ny.hour * 60 + now_ny.minute
         await self._sync_position(leg)
+        if leg.crypto and leg.position and (leg.stop_px or leg.target_px):
+            price = await asyncio.to_thread(self._crypto_price, inst.proxy)
+            if price and leg.stop_px and price <= leg.stop_px:
+                await self._flatten(leg, f"stop hit at {price:,.2f}")
+                return
+            if price and leg.target_px and price >= leg.target_px:
+                await self._flatten(leg, f"target hit at {price:,.2f}")
+                return
         if tod_now >= spec.flat_at:
             if leg.position:
                 await self._flatten(leg, "flat_at reached")
@@ -245,13 +262,18 @@ class PaperTrader:
 
     def _recent_bars(self, symbol: str, tf: int):
         from alpaca.data.enums import DataFeed
-        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
         from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
         end = datetime.now(timezone.utc)
-        req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame(tf, TimeFrameUnit.Minute),
-                               start=end - timedelta(days=12), end=end, feed=DataFeed(self.cfg.alpaca_live_feed))
-        df = self.data.get_stock_bars(req).df
+        if "/" in symbol:
+            req = CryptoBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame(tf, TimeFrameUnit.Minute),
+                                    start=end - timedelta(days=12), end=end)
+            df = self.crypto_data.get_crypto_bars(req).df
+        else:
+            req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame(tf, TimeFrameUnit.Minute),
+                                   start=end - timedelta(days=12), end=end, feed=DataFeed(self.cfg.alpaca_live_feed))
+            df = self.data.get_stock_bars(req).df
         if df is None or df.empty:
             return None
         if hasattr(df.index, "levels"):
@@ -261,6 +283,14 @@ class PaperTrader:
             df.index = df.index.tz_localize("UTC")
         df = filter_rth(df)
         return df[df.index <= end - timedelta(minutes=tf)]  # completed bars only
+
+    def _crypto_price(self, symbol: str) -> float | None:
+        from alpaca.data.requests import CryptoLatestTradeRequest
+
+        try:
+            return float(self.crypto_data.get_crypto_latest_trade(CryptoLatestTradeRequest(symbol_or_symbols=symbol))[symbol].price)
+        except Exception:
+            return None
 
     async def _enter(self, leg: Leg, ds, i: int, side: int, atr: np.ndarray) -> None:
         from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
@@ -285,6 +315,12 @@ class PaperTrader:
         contracts = min(contracts, spec.max_contracts, int(self.rules.max_contracts / inst.mini_equiv + 1e-9))
         if contracts < 1:
             leg.message = "risk too small for 1 contract; skipped"
+            return
+        if leg.crypto:
+            if side < 0:
+                leg.message = "short signal skipped: Alpaca cannot short crypto (long signals only)"
+                return
+            await self._enter_crypto(leg, c, dist, contracts, atr[i])
             return
         shares = int(round(contracts * inst.proxy_ratio * inst.point_value * self.scale))
         px = c / inst.proxy_ratio
@@ -315,10 +351,40 @@ class PaperTrader:
         self.bus.emit("paper", f"PAPER {rec['side'].upper()} {shares} {inst.proxy} (~{contracts} {inst.symbol}) [{spec.name}] stop {stop_px} target {tgt_px or '-'}")
         self._persist()
 
+    async def _enter_crypto(self, leg: Leg, c: float, dist: float, contracts: int, atr_i: float) -> None:
+        """Market buy; stop and target are watched by the trader because Alpaca crypto has no bracket orders."""
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.requests import MarketOrderRequest
+
+        spec, inst = leg.spec, leg.inst
+        qty = round(contracts * inst.proxy_ratio * inst.point_value * self.scale, 6)
+        px = c / inst.proxy_ratio
+        bp = self.account.get("buying_power", 0.0)
+        if bp and qty * px > bp * 0.95:
+            qty = round(bp * 0.95 / px, 6)
+        if qty <= 0:
+            leg.message = "not enough buying power; skipped"
+            return
+        tgt_dist = {"r": spec.target_value * dist, "atr": spec.target_value * atr_i, "pct": spec.target_value / 100 * c,
+                    "points": spec.target_value}.get(spec.target_type, 0.0)
+        leg.stop_px = round((c - dist) / inst.proxy_ratio, 2)
+        leg.target_px = round((c + tgt_dist) / inst.proxy_ratio, 2) if tgt_dist and tgt_dist > 0 else None
+        order = await asyncio.to_thread(self.trading.submit_order, MarketOrderRequest(
+            symbol=inst.proxy, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC))
+        leg.day_trades += 1
+        rec = {"t": time.time(), "strategy": spec.name, "symbol": inst.proxy, "side": "long", "shares": qty,
+               "contracts_equiv": contracts, "ref_price": round(px, 2), "stop": leg.stop_px, "target": leg.target_px,
+               "order_id": str(order.id), "entry": None, "pnl": None}
+        leg.open_trade = rec
+        self.trades.append(rec)
+        leg.message = f"entered long {qty} {inst.proxy}"
+        self.bus.emit("paper", f"PAPER LONG {qty} {inst.proxy} (~{contracts} {inst.symbol}) [{spec.name}] stop {leg.stop_px} target {leg.target_px or '-'} (watched by HIVEMIND)")
+        self._persist()
+
     async def _sync_position(self, leg: Leg) -> None:
         symbol = leg.inst.proxy
         try:
-            p = await asyncio.to_thread(self.trading.get_open_position, symbol)
+            p = await asyncio.to_thread(self.trading.get_open_position, leg.position_symbol)
             pos = {"side": "long" if float(p.qty) > 0 else "short", "qty": abs(float(p.qty)),
                    "avg": float(p.avg_entry_price), "unrealized": float(p.unrealized_pl)}
         except Exception:
@@ -334,6 +400,7 @@ class PaperTrader:
             else:
                 trade["pnl"] = round(leg.position.get("unrealized", 0.0) / self.scale, 2)
             leg.open_trade = None
+            leg.stop_px = leg.target_px = None
             self.bus.emit("paper", f"PAPER trade closed [{leg.spec.name}]: {trade['side']} {symbol} ${trade['pnl']:,.2f} (challenge units)")
             self._persist()
         leg.position = pos
@@ -368,7 +435,7 @@ class PaperTrader:
                 await asyncio.to_thread(self.trading.cancel_order_by_id, o.id)
             if leg.position:
                 await asyncio.sleep(0.5)
-                await asyncio.to_thread(self.trading.close_position, symbol)
+                await asyncio.to_thread(self.trading.close_position, leg.position_symbol)
             self.bus.emit("paper", f"Flattened {symbol} [{leg.spec.name}] ({why}).")
         except Exception as exc:
             self.bus.emit("error", f"Paper flatten of {symbol} failed: {exc}", persist=False)
@@ -433,6 +500,7 @@ class PaperTrader:
             "legs": [l.spec.to_dict() for l in self.legs], "combo_scale": self.combo_scale,
             "challenge": self.challenge, "days": self.days, "trades": list(self.trades), "day": self._day,
             "day_start_equity": self._day_start_equity, "day_trades": [l.day_trades for l in self.legs],
+            "leg_levels": [[l.stop_px, l.target_px] for l in self.legs],
         })
 
     def _restore(self, saved: dict) -> None:
@@ -442,6 +510,8 @@ class PaperTrader:
                 self.legs.append(Leg(spec, self.instruments[spec.instrument]))
         for leg, n in zip(self.legs, saved.get("day_trades") or []):
             leg.day_trades = n
+        for leg, (stop, target) in zip(self.legs, saved.get("leg_levels") or []):
+            leg.stop_px, leg.target_px = stop, target
         self.combo_scale = saved.get("combo_scale", 1.0)
         self.challenge = saved.get("challenge") or {}
         self.days = saved.get("days") or []

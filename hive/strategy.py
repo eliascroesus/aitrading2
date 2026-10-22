@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import re
 import json
 import math
 from dataclasses import asdict, dataclass, fields
@@ -234,13 +235,21 @@ def mutate(spec: StrategySpec, rng: np.random.Generator, instruments: list[str],
             child.origin = "mutation"
             child.author = "evolver"
             child.rationale = ""
-            child.name = _child_name(spec.name)
+            child.name = retag(_child_name(spec.name), child.instrument)
             return child
     return spec
 
 
+def retag(name: str, instrument: str) -> str:
+    """Keep the [MARKET] tag in a strategy name in sync with its instrument."""
+    tagged = re.sub(r"\[[A-Z0-9]{1,4}\]", f"[{instrument}]", name)
+    return tagged if tagged != name or f"[{instrument}]" in name else name
+
+
 def root_name(name: str) -> str:
-    return name.split(" ·")[0].split(" ⨯ ")[0].split(" ~n")[0].strip()[:44]
+    root = name.split(" ·")[0].split(" ⨯ ")[0].split(" ~n")[0]
+    root = re.sub(r"\s*\[[A-Z0-9]{1,4}\]?", "", root)  # the market column shows the instrument; drop stale tags
+    return root.strip()[:44]
 
 
 def _child_name(name: str) -> str:
@@ -422,5 +431,5 @@ def crossover(a: StrategySpec, b: StrategySpec, rng: np.random.Generator, instru
     child.origin = "crossover"
     child.author = "evolver"
     child.rationale = ""
-    child.name = f"{root_name(a.name)[:30]} ⨯ {root_name(b.name)[:24]}"
+    child.name = retag(f"{root_name(a.name)[:30]} ⨯ {root_name(b.name)[:24]}", child.instrument)
     return child

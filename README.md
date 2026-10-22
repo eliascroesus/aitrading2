@@ -1,6 +1,8 @@
 # HIVEMIND
 
-A self-improving swarm of Claude agents whose single objective is finding intraday futures strategies (Nasdaq, S&P 500, gold, and more) with the highest probability of passing prop-firm challenges such as the Topstep 50K Trading Combine. A live dashboard shows it working.
+A self-improving swarm of Claude agents whose single objective is finding intraday strategies with the highest probability of passing prop-firm challenges such as the Topstep 50K Trading Combine. A live dashboard shows it working.
+
+**Markets (default):** Nasdaq (MNQ), S&P 500 (MES), gold (MGC), forex EUR/USD (M6E) and Bitcoin (MBT). These are the markets futures prop firms list most and where most funded traders trade. Also available: NQ, ES, GC, Russell (M2K), Dow (MYM), GBP/USD (M6B) and Ether (MET), via `INSTRUMENTS` in `.env`.
 
 ```
                        ┌──────────────────────────────┐
@@ -134,7 +136,7 @@ Presets: `topstep_50k/100k/150k`, `apex_50k/100k`, `tradeify_50k`, `ftmo_100k`, 
 
 ## Alpaca paper trading
 
-Alpaca does not offer futures, so the deployed strategy trades the ETF proxy: QQQ for MNQ/NQ, SPY for MES/ES, GLD for MGC/GC. Shares are sized so one contract equals `proxy_ratio × point_value` shares, which gives the same dollars per point. Orders are bracket orders (market entry plus stop and target legs). The dashboard tracks a virtual challenge on account equity measured from the moment you deploy.
+Alpaca does not offer futures, so each strategy trades a proxy: QQQ for MNQ/NQ, SPY for MES/ES, GLD for MGC/GC, FXE for EUR/USD, FXB for GBP/USD, and spot BTC/USD or ETH/USD for Bitcoin and Ether. Position size is set so one contract equals `proxy_ratio × point_value` units, which gives the same dollars per point. ETF orders are bracket orders (market entry plus stop and target legs). Crypto on Alpaca has no bracket orders and cannot be shorted, so crypto strategies trade long signals only, and HIVEMIND watches their stop and target itself every 15 seconds. The dashboard tracks a virtual challenge on account equity measured from the moment you deploy.
 
 * Use a **dedicated paper account**: "stop & flatten" closes every position on it.
 * `PAPER_SIZE_SCALE=0.1` trades a tenth of the size and rescales the challenge P&L.
@@ -147,7 +149,7 @@ Alpaca does not offer futures, so the deployed strategy trades the ETF proxy: QQ
 
 ## Honest limits
 
-* **Proxy data:** ETF bars cover only US regular hours and approximate futures. Overnight sessions, the London open and roll effects are not in the data. `DATA_SOURCE=yahoo` gives real continuous futures, but only about 60 days of 5-minute history.
+* **Proxy data:** all markets are tested during US regular hours (09:30–16:00 New York) so their days line up. Overnight sessions, the London open (important for forex and gold), crypto weekends and futures roll effects are not in the data. The forex ETFs (FXE, FXB) trade thinly intraday, so forex results are the roughest. `DATA_SOURCE=yahoo` gives real continuous futures, but only about 60 days of 5-minute history.
 * **Overfitting:** searching thousands of strategies finds patterns in noise. A large gap between validation and holdout pass rates is the warning sign. Forward-test on paper before paying for a challenge.
 * **Fills:** the fill model is conservative, but it is still a model.
 * **Rule details:** firm rule details (how the daily loss limit, trailing drawdown and consistency are computed) differ from the presets in small ways.

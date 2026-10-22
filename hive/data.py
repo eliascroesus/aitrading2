@@ -138,18 +138,31 @@ class AlpacaProvider:
     name = "alpaca"
 
     def __init__(self, key: str, secret: str, feed: str = "sip"):
-        from alpaca.data.historical import StockHistoricalDataClient
+        from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 
         self.client = StockHistoricalDataClient(key, secret)
+        self.crypto = CryptoHistoricalDataClient(key, secret)
         self.feed = feed
 
     def fetch(self, symbol: str, timeframe: int, days: int) -> pd.DataFrame:
         from alpaca.data.enums import Adjustment, DataFeed
-        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
         from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
         end = datetime.now(timezone.utc) - timedelta(minutes=20)
         start = end - timedelta(days=days)
+        if "/" in symbol:  # spot crypto pair, e.g. BTC/USD
+            req = CryptoBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame(timeframe, TimeFrameUnit.Minute), start=start, end=end)
+            df = self.crypto.get_crypto_bars(req).df
+            if df is None or df.empty:
+                raise RuntimeError(f"no crypto bars returned for {symbol}")
+            if isinstance(df.index, pd.MultiIndex):
+                df = df.xs(symbol, level=0)
+            df = df[["open", "high", "low", "close", "volume"]].astype(float)
+            if df.index.tz is None:
+                df.index = df.index.tz_localize("UTC")
+            log.info("alpaca: %s %smin %d crypto bars", symbol, timeframe, len(df))
+            return df
         feeds = [self.feed] + (["iex"] if self.feed != "iex" else [])
         last_err: Exception | None = None
         for feed in feeds:
@@ -215,6 +228,9 @@ class SyntheticProvider:
         "IWM": (200.0, 0.014, 0.0001),
         "DIA": (390.0, 0.009, 0.0002),
         "FXE": (100.0, 0.005, 0.0),
+        "FXB": (123.0, 0.005, 0.0),
+        "BTC/USD": (60000.0, 0.030, 0.0010),
+        "ETH/USD": (3000.0, 0.038, 0.0008),
     }
 
     def __init__(self, seed: int = 7):

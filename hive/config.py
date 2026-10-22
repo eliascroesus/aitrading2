@@ -60,7 +60,7 @@ class Config:
 
     # --- challenge + markets ---
     prop_preset: str = "topstep_50k"
-    instruments: list[str] = field(default_factory=lambda: ["MNQ", "MES", "MGC"])
+    instruments: list[str] = field(default_factory=lambda: ["MNQ", "MES", "MGC", "M6E", "MBT"])
     timeframes: list[int] = field(default_factory=lambda: [5, 15])
     ratio_overrides: dict[str, float] = field(default_factory=dict)
 
@@ -124,7 +124,7 @@ def load_config() -> Config:
         workers=_int("HIVE_WORKERS", max(1, cpu // 2)),  # half the cores keeps a laptop usable
         ga_batch=_int("HIVE_GA_BATCH", 48),
         prop_preset=_env("PROP_PRESET", "topstep_50k"),
-        instruments=[s.upper() for s in _list("INSTRUMENTS", "MNQ,MES,MGC")],
+        instruments=[s.upper() for s in _list("INSTRUMENTS", "MNQ,MES,MGC,M6E,MBT")],
         timeframes=[int(x) for x in _list("TIMEFRAMES", "5,15")],
         ratio_overrides=ratios,
         data_source=_env("DATA_SOURCE", "auto").lower(),

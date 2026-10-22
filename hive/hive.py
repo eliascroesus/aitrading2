@@ -29,6 +29,7 @@ SEEN_CAP = 250_000  # how many recent strategy fingerprints are remembered for d
 UNVERIFIED = 0.85  # score multiplier until a strategy has survived the robustness check
 ROBUST_NEIGHBORS = 6  # nudged variants evaluated per robustness check
 ROBUST_TOP = 30  # strategies that could enter the top this many get checked
+MARKET_RESERVE = 30  # best strategies kept in memory per market even when another market dominates
 
 
 def score(rec: dict) -> float:
@@ -41,6 +42,8 @@ DEFAULT_MISSIONS = [
     ("Opening-range & momentum", "Opening range breakouts (5-60 min), first-bar direction, intraday momentum into the close, VWAP trend holds.", "MNQ"),
     ("Chop & reversion", "Mean reversion when the market is ranging: Bollinger/RSI extremes, VWAP deviations, failed breakouts, gap fills.", "MES"),
     ("Gold specialist", "Find what works on micro gold during US hours: breakouts after compression, sweeps, trend days.", "MGC"),
+    ("Forex specialist", "EUR/USD during the New York session: London-close reversals, VWAP and opening-range plays, sweeps of the prior day's levels.", "M6E"),
+    ("Crypto specialist", "Bitcoin during US hours: momentum bursts, volatility breakouts, liquidity sweeps; crypto runs on different days than stocks.", "MBT"),
     ("Risk architect", "Take the hall-of-fame leaders and re-engineer exits, breakeven, risk per trade, daily stops and session windows to maximise pass probability.", "any"),
     ("Wildcard", "Unconventional combinations nobody else is trying: candle patterns + structure, time-of-day edges, multi-condition hybrids.", "any"),
 ]
@@ -227,6 +230,9 @@ class Hive:
         batch_fits: list[float] = []
         floor = self._elite_floor()
         cut = self._leader_cut(ROBUST_TOP)
+        per_market: dict[str, int] = {}
+        for r in self.records.values():
+            per_market[r["spec"]["instrument"]] = per_market.get(r["spec"]["instrument"], 0) + 1
         for spec, res in pairs:
             uid = spec["uid"]
             if uid not in self.seen:
@@ -241,8 +247,10 @@ class Hive:
             niche = self.niches.setdefault(f"{spec['family']} / {spec['instrument']}", [0, 0.0])
             niche[0] += 1
             niche[1] = max(niche[1], fit)
-            if len(self.records) < 400 or fit * UNVERIFIED > floor:
+            reserve = fit >= STORE_MIN_FITNESS and per_market.get(spec["instrument"], 0) < MARKET_RESERVE
+            if len(self.records) < 400 or fit * UNVERIFIED > floor or reserve:
                 self.records[uid] = {"spec": spec, "result": res, "t": now}
+                per_market[spec["instrument"]] = per_market.get(spec["instrument"], 0) + 1
                 if fit >= 0.05 and fit * UNVERIFIED > cut and uid not in self.robust_queued:
                     prio = fit * (0.5 if spec.get("origin") == "neighbor" else 1.0)
                     heapq.heappush(self.robust_queue, (-prio, uid))
@@ -252,8 +260,17 @@ class Hive:
             for f in picks:
                 self.scatter.append([round(now, 1), round(f, 4)])
         if len(self.records) > 520:
-            top = sorted(self.records.values(), key=score, reverse=True)[:400]
-            self.records = {r["spec"]["uid"]: r for r in top}
+            ranked = sorted(self.records.values(), key=score, reverse=True)
+            keep = ranked[:400]
+            kept: dict[str, int] = {}
+            for r in keep:
+                kept[r["spec"]["instrument"]] = kept.get(r["spec"]["instrument"], 0) + 1
+            for r in ranked[400:]:  # every market keeps a reserve of its best strategies
+                m = r["spec"]["instrument"]
+                if kept.get(m, 0) < MARKET_RESERVE:
+                    keep.append(r)
+                    kept[m] = kept.get(m, 0) + 1
+            self.records = {r["spec"]["uid"]: r for r in keep}
         if len(self.robust_queue) > 200:
             self.robust_queue = heapq.nsmallest(150, self.robust_queue)
             heapq.heapify(self.robust_queue)
@@ -417,6 +434,14 @@ class Hive:
             "test_median_days": r["test"]["median_days"], "fast_days": r.get("fast_days"),
             "trades": r["train"]["trades"] + r["val"]["trades"] + r["test"]["trades"], "test_net": r["test"]["net"],
         }
+
+    def _leaders_by_market(self, n: int) -> dict[str, list[dict]]:
+        out: dict[str, list[dict]] = {}
+        for r in sorted(self.records.values(), key=score, reverse=True):
+            group = out.setdefault(r["spec"]["instrument"], [])
+            if len(group) < n:
+                group.append(self.summary(r))
+        return out
 
     def leaders(self, n: int = 25, diverse: bool = False) -> list[dict]:
         ranked = sorted(self.records.values(), key=score, reverse=True)
@@ -866,6 +891,7 @@ class Hive:
             "agents": [a.to_dict() for a in sorted(self.agents.values(), key=lambda a: (a.kind != "overmind", a.born))],
             "graveyard": list(reversed(self.graveyard[-30:])),
             "leaders": [self.summary(r) for r in self.leaders(60)],
+            "leaders_by_market": self._leaders_by_market(25),
             "combos": [self.combo_summary(c) for c in self.best_combos(10)],
             "history": hist,
             "scatter": list(self.scatter)[::2] if len(self.scatter) > 1200 else list(self.scatter),

@@ -254,3 +254,17 @@ def test_combo_evaluation():
     for seg in ("train", "val", "test"):
         assert 0.0 <= res[seg]["pass_fast"] <= 1.0 and 0.0 <= res[seg]["luck_fast"] <= 1.0
     assert 0.0 <= res["fitness"] <= 1.0 and res["equity"]
+
+
+def test_forex_and_crypto_instruments_evaluate():
+    from hive.instruments import INSTRUMENTS
+    assert INSTRUMENTS["MBT"].asset_class == "crypto" and INSTRUMENTS["MBT"].proxy == "BTC/USD"
+    assert INSTRUMENTS["M6E"].proxy == "FXE"
+    for sym, proxy in (("MBT", "BTC/USD"), ("M6E", "FXE")):
+        inst = get_instrument(sym)
+        raw = filter_rth(SyntheticProvider(seed=4).fetch(proxy, 5, 120))
+        d = build_dataset(raw, inst, 5, "synthetic", inst.proxy_ratio)
+        evaluator.init_local({d.key: d}, propfirm.get_rules("topstep_50k"), {}, mc_sims=50)
+        results = [evaluator.evaluate(s.to_dict()) for s in seeds.seed_strategies([sym], [5])]
+        assert all(r["ok"] for r in results), [r.get("error") for r in results if not r["ok"]]
+        assert any(r["trades"] > 0 for r in results), sym

@@ -14,6 +14,7 @@ const state = {
   openAgents: new Set(),
   live: false,
   hoverX: null,
+  market: "",
 };
 
 // ---------------------------------------------------------------- formatting
@@ -227,8 +228,22 @@ function agentCard(a, d) {
 }
 
 // ---------------------------------------------------------------- leaderboard
+const MARKET_NAMES = { MNQ: "Nasdaq", NQ: "Nasdaq", MES: "S&P 500", ES: "S&P 500", MGC: "Gold", GC: "Gold", M6E: "EUR/USD", M6B: "GBP/USD", MBT: "Bitcoin", MET: "Ether", M2K: "Russell", MYM: "Dow" };
+
+function renderMarketFilter(d) {
+  const markets = [...new Set((d.datasets || []).map((x) => x.instrument))];
+  const box = $("#board-market");
+  const key = markets.join(",");
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.innerHTML = [`<button data-m="" class="${state.market ? "" : "on"}">All markets</button>`,
+    ...markets.map((m) => `<button data-m="${m}" class="${state.market === m ? "on" : ""}" title="${m}">${MARKET_NAMES[m] || m}</button>`)].join("");
+}
+
 function renderBoard(d) {
-  let rows = d.leaders.map((r, i) => ({ ...r, rank: i + 1 }));
+  renderMarketFilter(d);
+  const pool = state.market ? (d.leaders_by_market || {})[state.market] || [] : d.leaders;
+  let rows = pool.map((r, i) => ({ ...r, rank: i + 1 }));
   if (state.boardMode === "niche") {
     const seen = new Set();
     rows = rows.filter((r) => {
@@ -675,6 +690,14 @@ function bind() {
   $("#d-close").onclick = closeDrawer;
   $("#scrim").onclick = closeDrawer;
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+  $("#board-market").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-m]");
+    if (!b) return;
+    state.market = b.dataset.m;
+    $$("#board-market button").forEach((x) => x.classList.toggle("on", x === b));
+    state.seenLeaders = null;
+    if (state.snap) renderBoard(state.snap);
+  });
   $$("#board-mode button").forEach((b) => (b.onclick = () => {
     state.boardMode = b.dataset.mode;
     $$("#board-mode button").forEach((x) => x.classList.toggle("on", x === b));
