@@ -147,14 +147,16 @@ function renderKpis(d) {
   $("#k-tested").textContent = compact(s.tested);
   $("#k-rate").textContent = `${compact(Math.round(s.rate_per_min))}/min · ${s.workers} workers · ${dur(s.elapsed)}`;
   $("#k-val").textContent = pct(s.best_val_pass);
-  $("#k-fit").textContent = `fitness ${num(s.best_fitness, 3)}`;
+  $("#k-fit").textContent = `score ${num(s.best_fitness, 3)} · ${s.best_robust ? "✓ robust" : "robustness check pending"}${s.robust_queue ? ` · ${s.robust_queue} queued` : ""}`;
   $("#k-test").textContent = pct(s.best_test_pass);
   const fee = d.mode.rules.fee_usd || 0;
+  const luck = s.best_test_luck != null ? `luck ${pct(s.best_test_luck)} · ` : "";
+  const fast = s.best_test_fast != null ? `≤${s.fast_days}d ${pct(s.best_test_fast)} · ` : "";
   if (s.best_test_pass > 0.001) {
     const attempts = 1 / s.best_test_pass;
-    $("#k-attempts").textContent = `≈ ${attempts.toFixed(1)} attempts to pass${fee ? ` · ~${money(attempts * fee)} fees` : ""}`;
+    $("#k-attempts").textContent = `${luck}${fast}≈ ${attempts.toFixed(1)} tries${fee ? ` (~${money(attempts * fee)})` : ""}`;
   } else {
-    $("#k-attempts").textContent = "no holdout passes yet";
+    $("#k-attempts").textContent = `${luck}no holdout passes yet`;
   }
   $("#k-agents").textContent = `${s.drones_alive}/${s.max_drones}`;
   $("#k-deaths").textContent = `drones alive · ${s.deaths} deleted`;
@@ -173,7 +175,7 @@ function renderChampion(d) {
     <span class="crown">♛</span>
     <span class="cname">${esc(top.name)}</span>
     <span class="cmeta">${esc(top.instrument)} ${top.timeframe}m · ${esc(top.family)} · by ${esc(top.author)}</span>
-    <span class="cmeta">val pass <b class="warn">${pct(top.val_pass)}</b> · holdout <b class="pos">${pct(top.test_pass)}</b> · ${top.trades} trades · median ${top.median_days ? Math.round(top.median_days) : "—"} days to pass</span>`;
+    <span class="cmeta">score ${num(top.score, 3)} ${top.robust ? "✓" : "(checking)"} · val pass <b class="warn">${pct(top.val_pass)}</b> · holdout <b class="pos">${pct(top.test_pass)}</b> vs luck ${pct(top.test_luck)} · ${top.trades} trades · median ${top.median_days ? Math.round(top.median_days) : "—"} days to pass</span>`;
 }
 
 // ---------------------------------------------------------------- agents
@@ -246,15 +248,18 @@ function renderBoard(d) {
       <td class="left"><span class="sname" title="${esc(r.name)}">${esc(r.name)}</span><span class="ssub">${esc(r.author)} · ${esc(r.origin)} · ${esc(r.sides)}</span></td>
       <td>${esc(r.instrument)} ${r.timeframe}m</td>
       <td><span class="fam">${esc(r.family.replace("_", " "))}</span></td>
-      <td><span class="fitbar">${num(r.fitness, 3)}<span class="bar"><i style="width:${Math.max(2, r.fitness * 100)}%"></i></span></span></td>
+      <td><span class="fitbar" title="${r.robust ? `robustness-checked; neighbours' median fitness ${num(r.robust_median, 3)}` : "robustness check pending"}">${r.robust ? '<b class="pos">✓</b>' : '<span class="muted">·</span>'} ${num(r.score, 3)}<span class="bar"><i style="width:${Math.max(2, r.score * 100)}%"></i></span></span></td>
       <td class="warn">${pct(r.val_pass)}</td>
       <td class="${r.test_pass >= 0.5 ? "pos" : r.test_pass < 0.15 ? "neg" : ""}">${pct(r.test_pass)}</td>
+      <td class="${r.test_luck != null && r.test_pass > r.test_luck + 0.1 ? "pos" : "muted"}">${pct(r.test_luck)}</td>
+      <td>${pct(r.test_fast)}</td>
       <td>${r.median_days ? Math.round(r.median_days) : "—"}</td>
       <td>${r.trades}</td>
       <td>${pct(r.win_rate)}</td>
       <td>${num(r.pf, 2)}</td>
       <td class="${signCls(r.net)}">${money(r.net)}</td>
-    </tr>`).join("") : `<tr><td colspan="12" class="left muted">No strategies yet.</td></tr>`;
+    </tr>`).join("") : `<tr><td colspan="14" class="left muted">No strategies yet.</td></tr>`;
+  if (d.stats.fast_days) $("#fast-th").textContent = `≤${d.stats.fast_days}d`;
   state.seenLeaders = now;
 }
 
@@ -446,7 +451,7 @@ function drawEvo() {
     for (const q of hist) { if (q[0] <= t) p = q; else break; }
     ctx.strokeStyle = "rgba(231,234,240,0.25)"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.moveTo(state.hoverX, pad.t); ctx.lineTo(state.hoverX, h - pad.b); ctx.stroke(); ctx.setLineDash([]);
-    tip.innerHTML = `<b>${clock(t)}</b><br>best fitness <b style="color:#f5b544">${num(p[1], 3)}</b><br>validation pass <b style="color:#4cc9f0">${pct(p[2])}</b><br>holdout pass <b style="color:#3ddc97">${pct(p[3])}</b><br>tested ${compact(p[4])}`;
+    tip.innerHTML = `<b>${clock(t)}</b><br>best score <b style="color:#f5b544">${num(p[1], 3)}</b><br>validation pass <b style="color:#4cc9f0">${pct(p[2])}</b><br>holdout pass <b style="color:#3ddc97">${pct(p[3])}</b><br>tested ${compact(p[4])}`;
     tip.style.opacity = 1;
     tip.style.left = `${Math.min(state.hoverX + 12, w - 170)}px`;
     tip.style.top = "14px";
@@ -538,8 +543,8 @@ function renderDrawer(rec) {
     <div>
       <div class="section-title">Challenge simulation (${esc(state.snap?.mode.rules_name || "")})</div>
       <table class="seg-table">
-        <tr><th>Segment</th><th>Pass (MC)</th><th>Pass (replay)</th><th>Trades</th><th>Win</th><th>PF</th><th>Net</th><th>Max DD</th><th>Days to pass</th></tr>
-        ${segs.map(([n, m, cls]) => `<tr class="${cls}"><td>${n}${cls ? " ✓ untouched" : ""}${n === "Train" && r.folds ? `<div class="muted small">folds ${r.folds.map((f) => pct(f)).join(" / ")}</div>` : ""}</td><td>${pct(m.pass_mc)}</td><td>${pct(m.pass_hist)}</td><td>${m.trades}</td><td>${pct(m.win_rate)}</td><td>${num(Math.min(m.profit_factor, 99), 2)}</td><td class="${signCls(m.net)}">${money(m.net)}</td><td>${money(m.max_dd)}</td><td>${m.median_days ? Math.round(m.median_days) : "—"}</td></tr>`).join("")}
+        <tr><th>Segment</th><th>Pass (MC)</th><th>≤${r.fast_days || 10}d</th><th title="same risk, zero edge">Luck</th><th>Pass (replay)</th><th>Trades</th><th>Win</th><th>PF</th><th>Net</th><th>Max DD</th><th>Days to pass</th></tr>
+        ${segs.map(([n, m, cls]) => `<tr class="${cls}"><td>${n}${cls ? " ✓ untouched" : ""}${n === "Train" && r.folds ? `<div class="muted small">folds ${r.folds.map((f) => pct(f)).join(" / ")}</div>` : ""}</td><td>${pct(m.pass_mc)}</td><td>${pct(m.pass_fast)}</td><td>${pct(m.luck)}</td><td>${pct(m.pass_hist)}</td><td>${m.trades}</td><td>${pct(m.win_rate)}</td><td>${num(Math.min(m.profit_factor, 99), 2)}</td><td class="${signCls(m.net)}">${money(m.net)}</td><td>${money(m.max_dd)}</td><td>${m.median_days ? Math.round(m.median_days) : "—"}</td></tr>`).join("")}
       </table>
     </div>
     <div>
@@ -571,6 +576,7 @@ function renderDrawer(rec) {
       ${mini("Avg hold", `${num(r.avg_hold_bars, 1)} bars`)}
       ${mini("Long share", pct(r.long_share))}
     </div>
+    <div class="muted small">${r.robust ? `Robustness: ${r.robust.n} nudged variants, median fitness ${num(r.robust.median, 3)} (own ${num(r.fitness, 3)}, worst ${num(r.robust.min, 3)}) → score ${num(r.robust_score, 3)}` : `Robustness check pending (unchecked strategies rank at 85% of fitness ${num(r.fitness, 3)})`}${r.conditions != null ? ` · ${r.conditions} conditions per side` : ""}</div>
     <div class="muted small">Exits: ${esc(reasons)} · uid ${s.uid}${s.parents ? ` · parents ${esc(s.parents)}` : ""}</div>
     ${s.rationale ? `<div><div class="section-title">Rationale</div><div class="rationale">${esc(s.rationale)}</div></div>` : ""}
   `;

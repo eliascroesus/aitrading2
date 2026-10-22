@@ -94,12 +94,31 @@ python -m hive
 | Hive memory / Graveyard | Lessons the agents share; deleted agents and why they were deleted |
 | Command bar | Give the Overmind an order. It is treated as highest priority in the next cycle. |
 
+## Reading the results
+
+| Number | What it means | Good |
+|---|---|---|
+| **Holdout** | Pass rate on the newest 20% of history, which the hive never selects on. This is the honest number. | the higher the better |
+| **Luck** | Pass rate the same risk would get with zero edge, from volatility alone. | |
+| **Holdout − Luck** | The part of the pass rate that comes from real edge. | under 5 points = no edge; 10–20 = promising; 25+ = strong |
+| **Val pass vs Holdout** | A big gap means the strategy is partly memorising history. | gap under ~10 points |
+| **✓ Score** | The strategy kept performing when every setting was nudged (robustness check). | ✓ present |
+| **≤10d / Days** | Share of attempts passed within 10 trading days / median days to pass. | depends on your goal |
+
+Before paying for a real challenge, deploy the candidate to Alpaca paper and let the virtual challenge run for a few weeks.
+
+Passing fast and passing reliably pull against each other. Hitting +$3,000 in 3–7 days with a $2,000 trailing drawdown needs large daily swings, and large swings hit the drawdown more often. Set `PROP_TARGET_DAYS` (e.g. `10`) to make the hive optimise for passing within that many days, and expect lower pass rates the shorter you make it.
+
 ## How a strategy is judged
 
 1. **Strategy = JSON spec.** It holds long/short entry expressions, an optional exit expression, a stop (ATR / % / points / swing), a target (R / ATR / % / points / none), breakeven, max hold, session window, flat time, risk per trade, trades per day, and daily stop/target. The expression language (`hive/lang.py`) covers price/volume, VWAP, sessions and opening ranges, prior day/week levels, ICT/SMC primitives (`sweep_pdl()`, `sweep_or_high(30)`, `fvg_bull()`, `in_bull_fvg(6)`, `displacement(1.5)`, `bos_up(20)`), indicators (EMA, RSI, ADX, MACD, Bollinger, ATR…) and candles. Expressions are parsed against a whitelist and evaluated vectorised. Every function only uses past bars, and the tests check this.
 2. **Backtest** (`hive/backtest.py`). Signal on bar close, fill next open plus 1 tick, intrabar stop/target with stop-first on ties, gaps fill at the open, commissions, flat by `flat_at`, one position at a time. Size = `risk_usd / (stop distance × point value)`, capped by the firm's contract limit.
 3. **Challenge simulation** (`hive/propfirm.py`). Each day's P&L, and the intraday equity low/high including open-trade drawdown, is replayed through the rulebook: profit target, max loss (static / end-of-day trailing / intraday trailing), daily loss limit, consistency rule, minimum days and a time limit. Pass probability comes from a 5-day block-bootstrap Monte Carlo and from replaying every possible start day.
-4. **Fitness** = geometric mean of the pass rates on three train folds and the validation segment, times a trade-count factor. A strategy has to pass in every period, not just one lucky stretch. The last 20% of history (the **holdout**) is never used for selection; it is the number to trust.
+4. **Fitness** = geometric mean of the pass rates on three train folds and the validation segment (pass within `PROP_TARGET_DAYS` when set), times a trade-count factor and a small penalty for rules with many conditions. A strategy has to pass in every period, not just one lucky stretch.
+5. **Robustness check.** Every strategy that could reach the top 30 is re-run as 6 variants with every number nudged (periods ±10–15%, thresholds ±5–10%, times ±5–10 min, stop/target/risk ±10%). Its score becomes the average of its own fitness and the variants' median, and unchecked strategies rank at 85%. Knife-edge settings lose.
+6. **Holdout and luck.** The last 20% of history is never used for selection. It is shown next to the zero-edge **luck baseline**, so you can see how much of a pass rate is real edge.
+
+The evolver keeps several strategy families evolving at once (half its parents come from per-niche elites), and 5 years of history (`HISTORY_DAYS`) make strategies survive several market regimes.
 
 Presets: `topstep_50k/100k/150k`, `apex_50k/100k`, `tradeify_50k`, `ftmo_100k`, or `custom` (see `.env.example`). Firms change their rules often: check the current rulebook and edit the preset.
 

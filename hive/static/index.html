@@ -76,7 +76,7 @@
         <div class="card-head">
           <h2>Evolution</h2>
           <div class="legend">
-            <span><i class="sw sw-best"></i>best fitness</span>
+            <span><i class="sw sw-best"></i>best score</span>
             <span><i class="sw sw-val"></i>champion validation pass</span>
             <span><i class="sw sw-test"></i>champion holdout pass</span>
             <span><i class="sw sw-dot"></i>tested strategies</span>
@@ -110,9 +110,11 @@
                 <th data-sort="name" class="left">Strategy</th>
                 <th data-sort="instrument">Market</th>
                 <th data-sort="family">Family</th>
-                <th data-sort="fitness">Fitness</th>
+                <th data-sort="score" title="Ranking score: fitness re-tested with nudged settings (✓ = robustness-checked)">Score</th>
                 <th data-sort="val_pass">Val pass</th>
-                <th data-sort="test_pass">Holdout</th>
+                <th data-sort="test_pass" title="Pass rate on the untouched holdout data">Holdout</th>
+                <th data-sort="test_luck" title="Holdout pass rate of the same risk with zero edge. Real edge = Holdout minus Luck.">Luck</th>
+                <th data-sort="test_fast" id="fast-th" title="Holdout: share of attempts passed within the fast-pass window">≤10d</th>
                 <th data-sort="median_days">Days</th>
                 <th data-sort="trades">Trades</th>
                 <th data-sort="win_rate">Win</th>

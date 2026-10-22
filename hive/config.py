@@ -66,7 +66,7 @@ class Config:
 
     # --- data ---
     data_source: str = "auto"  # auto | alpaca | yahoo | synthetic
-    history_days: int = 730
+    history_days: int = 1825
     rth_only: bool = True
 
     # --- Alpaca ---
@@ -128,7 +128,7 @@ def load_config() -> Config:
         timeframes=[int(x) for x in _list("TIMEFRAMES", "5,15")],
         ratio_overrides=ratios,
         data_source=_env("DATA_SOURCE", "auto").lower(),
-        history_days=_int("HISTORY_DAYS", 730),
+        history_days=_int("HISTORY_DAYS", 1825),
         rth_only=_bool("RTH_ONLY", True),
         alpaca_key=_env("ALPACA_API_KEY"),
         alpaca_secret=_env("ALPACA_SECRET_KEY"),

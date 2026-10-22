@@ -168,6 +168,7 @@ def _markets_text(instruments: dict[str, Instrument], datasets_meta: dict) -> st
 
 
 def drone_system_prompt(rules: PropRules, instruments: dict[str, Instrument], datasets_meta: dict, horizon: int) -> str:
+    speed_line = f"PASS SPEED: fitness counts only challenges passed within {rules.target_days} trading days." if rules.target_days else ""
     return f"""You are a strategy-design drone inside HIVEMIND, a swarm of AI agents with one objective: discover intraday futures strategies that pass prop-firm evaluation challenges with the highest possible probability and make money. Nothing else matters.
 
 THE CHALLENGE YOU ARE OPTIMIZING FOR
@@ -176,7 +177,11 @@ THE CHALLENGE YOU ARE OPTIMIZING FOR
 HOW YOUR STRATEGIES ARE SCORED
 Each strategy is backtested on historical bars, then its day-by-day results are replayed through the challenge rules thousands of times (block-bootstrap Monte Carlo, {horizon}-trading-day attempts). Data is split by time into TRAIN (first 60%) and VALIDATION (next 20%); a final 20% HOLDOUT is hidden from you and used to judge the hive.
 fitness = geometric mean of the pass rates on THREE consecutive train folds and the validation segment, x trade-count factor (full credit at >=40 train trades and >=12 validation trades), x 0.5 if validation P&L is negative, with a small bonus for passing in fewer days.
-So: a strategy must pass in every period (not one lucky stretch), trade often enough, and reach +${rules.profit_target:,.0f} before the account hits the max-loss floor. Variance control (risk per trade vs. the ${rules.max_loss:,.0f} max loss and the daily loss limit), win rate, payoff, frequency and session choice all drive the pass rate. Strategies that only work on one segment score near zero.
+Rules with more than 4 conditions per side are discounted 1.5% per extra condition (simple rules generalise better).
+ROBUSTNESS CHECK: every strategy that could enter the top 30 is re-run with all its numbers nudged slightly (periods +-10-15%, thresholds +-5-10%, times +-5-10 min, stop/target/risk +-10%). Its ranking score becomes the average of its own fitness and the median of those neighbours; unchecked strategies rank at 85% of fitness. Knife-edge parameter choices therefore lose; broad, stable edges win.
+{speed_line}
+So: a strategy must pass in every period (not one lucky stretch), survive small parameter changes, trade often enough, and reach +${rules.profit_target:,.0f} before the account hits the max-loss floor.
+A zero-edge strategy passes a meaningful share of attempts by luck; the dashboard compares every strategy's holdout pass rate to that luck baseline, so only real edge counts. Variance control (risk per trade vs. the ${rules.max_loss:,.0f} max loss and the daily loss limit), win rate, payoff, frequency and session choice all drive the pass rate. Strategies that only work on one segment score near zero.
 
 MARKETS (bars are regular trading hours 09:30-16:00 New York, prices in futures points)
 {_markets_text(instruments, datasets_meta)}
@@ -215,7 +220,8 @@ MARKETS
 THE HIVE
 - Drones: Claude agents you spawn. Each round a drone designs strategies (an expression language over intraday bars: liquidity sweeps, FVGs, opening ranges, VWAP, ICT/SMC concepts, indicators, session timing...) and gets back their backtest + challenge Monte Carlo results. Up to {max_drones} drones can live at once.
 - Evolver: a genetic algorithm that continuously mutates and crosses the best strategies (thousands per hour). You steer it with evolver_focus: exploit (refine the leaders), balanced, explore (more random immigrants and diversity).
-- Fitness = geometric mean of pass rates on three train folds + validation, x trade-count factor; a hidden holdout segment (never used for selection) judges the hive. A large gap between validation and holdout means overfitting.
+- Fitness = geometric mean of pass rates on three train folds + validation, x trade-count factor, x simplicity. Leading strategies are then re-tested with nudged parameters (robustness check) and ranked by that robust score. A hidden holdout segment (never used for selection) judges the hive; a large gap between validation and holdout means overfitting, and a holdout pass rate near the zero-edge luck baseline means no real edge.
+- When the leaderboard is full of near-identical variants of one idea, that niche is saturated: push drones toward different families, instruments, sessions and timeframes.
 - Hive memory: shared insights every drone reads. Add durable lessons with `memory`.
 
 NATURAL SELECTION (enforced automatically)

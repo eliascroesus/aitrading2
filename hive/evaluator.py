@@ -6,6 +6,7 @@ segments; the holdout segment is computed for display and never used for selecti
 """
 from __future__ import annotations
 
+import ast
 import math
 import pickle
 import zlib
@@ -87,7 +88,9 @@ def _seg_metrics(tr: backtest.Trades, day_rec: dict, d0: int, d1: int, rules: pr
         "best_day": float(dp.max()) if len(dp) else 0.0,
         "trade_days": int((days["count"] > 0).sum()),
         "pass_mc": mc["pass"],
+        "pass_fast": mc["pass_fast"],
         "pass_hist": hist["pass"],
+        "luck": propfirm.luck_baseline(rules, days, rng),
         "fail_maxloss": mc["fail_maxloss"],
         "fail_dll": mc["fail_dll"],
         "timeout": mc["timeout"],
@@ -96,23 +99,38 @@ def _seg_metrics(tr: backtest.Trades, day_rec: dict, d0: int, d1: int, rules: pr
     }
 
 
-def fitness(train: dict, val: dict, rules: propfirm.PropRules, folds: list[float] | None = None) -> float:
+def complexity(spec: StrategySpec) -> int:
+    """Number of conditions/indicators per side: a proxy for how easily a rule can be curve-fitted."""
+    exprs = [e for e in (spec.long_entry, spec.short_entry) if e]
+    if not exprs:
+        return 0
+    total = 0
+    for e in exprs:
+        tree = lang.parse(e)
+        total += sum(isinstance(n, (ast.Compare, ast.Call)) for n in ast.walk(tree))
+    return round(total / len(exprs))
+
+
+def fitness(train: dict, val: dict, rules: propfirm.PropRules, folds: list[float] | None = None, n_conditions: int = 0) -> float:
     """Robust pass probability in [0, 1].
 
     Geometric mean of the Monte Carlo pass rates on three consecutive train folds and the
-    validation segment, so a strategy has to pass in every period rather than one lucky stretch.
-    Discounted for too few trades and for losing validation P&L, with a small weight on speed."""
-    rates = list(folds) if folds else [train["pass_mc"]]
-    rates.append(val["pass_mc"])
+    validation segment (pass within PROP_TARGET_DAYS when set), so a strategy has to pass in
+    every period rather than one lucky stretch. Discounted for too few trades, losing validation
+    P&L and rules with many conditions (easier to curve-fit), with a small weight on speed."""
+    key = "pass_fast" if rules.target_days else "pass_mc"
+    rates = list(folds) if folds else [train[key]]
+    rates.append(val[key])
     eps = 0.02
     base = max(0.0, math.exp(sum(math.log(max(p, 0.0) + eps) for p in rates) / len(rates)) - eps)
     trade_factor = min(1.0, train["trades"] / 40.0) * min(1.0, val["trades"] / 12.0)
     profit_factor = 1.0 if val["net"] > 0 else 0.5
+    simplicity = 0.985 ** max(0, n_conditions - 4)
     md = val["median_days"] or rules.horizon_days
     speed = 1.0 - min(1.0, md / rules.horizon_days)
     # tiny tie-breaker on expectancy so zero-pass strategies still rank (gives the GA a gradient)
     tie = 0.002 * math.tanh((train["expectancy"] + val["expectancy"]) / 200.0)
-    return float(min(1.0, max(0.0, base * trade_factor * profit_factor * (0.94 + 0.06 * speed) + tie)))
+    return float(min(1.0, max(0.0, base * trade_factor * profit_factor * simplicity * (0.94 + 0.06 * speed) + tie)))
 
 
 def _equity_curve(ds: Dataset, day_pnl: np.ndarray, max_points: int = 260) -> list[list[float]]:
@@ -156,17 +174,21 @@ def evaluate(spec_dict: dict) -> dict:
         segs = {name: _seg_metrics(trades, day_rec, *_segment_days(ds, name), rules, rng) for name in ("train", "val", "test")}
         d0, d1 = ds.splits["train"]
         edges = np.linspace(d0, d1, 4).astype(int)
+        fold_key = "pass_fast" if rules.target_days else "pass"
         folds = [
-            propfirm.pass_probability_mc(rules, {k: v[a:b] for k, v in day_rec.items()}, rng, sims=max(100, _MC_SIMS // 2))["pass"]
+            propfirm.pass_probability_mc(rules, {k: v[a:b] for k, v in day_rec.items()}, rng, sims=max(100, _MC_SIMS // 2))[fold_key]
             for a, b in zip(edges[:-1], edges[1:])
         ]
-        fit = fitness(segs["train"], segs["val"], rules, folds)
+        n_cond = complexity(spec)
+        fit = fitness(segs["train"], segs["val"], rules, folds, n_cond)
         reasons = np.bincount(trades.reason, minlength=len(backtest.REASONS)) if len(trades) else np.zeros(len(backtest.REASONS), int)
         return {
             "ok": True,
             "uid": uid,
             "fitness": fit,
             "folds": folds,
+            "conditions": n_cond,
+            "fast_days": rules.fast_days,
             "train": segs["train"],
             "val": segs["val"],
             "test": segs["test"],

@@ -293,7 +293,7 @@ def load_datasets(cfg, instruments: dict[str, Instrument]) -> tuple[dict[str, Da
         ticker = inst.yahoo if provider.name == "yahoo" else inst.proxy
         ratio = 1.0 if provider.name == "yahoo" else inst.proxy_ratio
         for tf in cfg.timeframes:
-            path = cache_dir / f"{provider.name}_{sym}_{tf}m.pkl"
+            path = cache_dir / f"{provider.name}_{sym}_{tf}m_{cfg.history_days}d.pkl"
             ds = None
             if path.exists() and time.time() - path.stat().st_mtime < 12 * 3600:
                 try:

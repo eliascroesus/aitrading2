@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 import numpy as np
 
@@ -38,6 +38,11 @@ class PropRules:
     horizon_days: int  # how many trading days one attempt is simulated for
     max_contracts: float  # in full-size (mini) contract equivalents; micros count 0.1
     fee_usd: float
+    target_days: int | None = None  # optimise for passing within this many trading days (None = whole horizon)
+
+    @property
+    def fast_days(self) -> int:
+        return self.target_days or 10
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -57,6 +62,8 @@ class PropRules:
             parts.append(f"min {self.min_days} trading days")
         parts.append(f"max {self.max_contracts:g} contracts (micros count 0.1)")
         parts.append(f"simulated attempt length {self.horizon_days} trading days")
+        if self.target_days:
+            parts.append(f"GOAL: pass within {self.target_days} trading days")
         return "; ".join(parts)
 
 
@@ -72,6 +79,14 @@ PRESETS: dict[str, PropRules] = {
 
 
 def get_rules(key: str) -> PropRules:
+    rules = _base_rules(key)
+    target = os.getenv("PROP_TARGET_DAYS", "").strip()
+    if target:
+        rules = replace(rules, target_days=max(1, min(int(target), rules.horizon_days)))
+    return rules
+
+
+def _base_rules(key: str) -> PropRules:
     key = (key or "topstep_50k").lower()
     if key == "custom":
         env = os.getenv
@@ -166,6 +181,7 @@ def _summarise(status: np.ndarray, days_to_pass: np.ndarray, final_bal: np.ndarr
     d = days_to_pass[passed]
     return {
         "pass": float(passed.mean()) if len(status) else 0.0,
+        "pass_fast": float((passed & (days_to_pass <= rules.fast_days)).sum() / n) if len(status) else 0.0,
         "fail_maxloss": float((status == FAIL_MAXLOSS).sum() / n),
         "fail_dll": float((status == FAIL_DLL).sum() / n),
         "timeout": float((status == ACTIVE).sum() / n),
@@ -187,6 +203,18 @@ def pass_probability_mc(rules: PropRules, day: dict[str, np.ndarray], rng: np.ra
     idx = ((starts[:, :, None] + np.arange(block)[None, None, :]) % D).reshape(sims, nb * block)[:, :T]
     st, dtp, fb = simulate(rules, pnl[idx], low[idx], high[idx], traded[idx])
     return _summarise(st, dtp, fb, rules)
+
+
+def luck_baseline(rules: PropRules, day: dict[str, np.ndarray], rng: np.random.Generator, sims: int = 300) -> float:
+    """Pass rate of the same day-to-day risk with the edge removed (each trading day shifted by minus the
+    average trading-day P&L). A strategy only has a real edge if it beats this number."""
+    traded = day["count"] > 0
+    if not traded.any():
+        return 0.0
+    mu = float(day["pnl"][traded].mean())
+    shift = np.where(traded, mu, 0.0)
+    flat = {"pnl": day["pnl"] - shift, "low": day["low"] - shift, "high": day["high"] - shift, "count": day["count"]}
+    return pass_probability_mc(rules, flat, rng, sims=sims)["pass"]
 
 
 def pass_probability_hist(rules: PropRules, day: dict[str, np.ndarray]) -> dict:

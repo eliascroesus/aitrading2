@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import multiprocessing as mp
 import time
@@ -18,13 +19,22 @@ from .instruments import Instrument
 from .llm import LLM, BudgetExceeded, LLMError
 from .propfirm import PropRules
 from .store import Bus, Store
-from .strategy import StrategySpec, crossover, mutate
+from .strategy import StrategySpec, crossover, mutate, neighbors
 
 log = logging.getLogger("hive.core")
 
 STORE_MIN_FITNESS = 0.02  # strategies below this are counted but not written to disk
 STORE_MAX_ROWS = 20_000  # database keeps the best this many strategies
 SEEN_CAP = 250_000  # how many recent strategy fingerprints are remembered for de-duplication
+UNVERIFIED = 0.85  # score multiplier until a strategy has survived the robustness check
+ROBUST_NEIGHBORS = 6  # nudged variants evaluated per robustness check
+ROBUST_TOP = 30  # strategies that could enter the top this many get checked
+
+
+def score(rec: dict) -> float:
+    """Ranking score: robustness-checked score when available, otherwise discounted fitness."""
+    r = rec["result"]
+    return r.get("robust_score", r["fitness"] * UNVERIFIED)
 
 DEFAULT_MISSIONS = [
     ("ICT liquidity hunter", "Liquidity sweeps of PDH/PDL, opening-range and session highs/lows into fair value gaps; killzone timing (10:00-11:00 NY silver bullet, NY open).", "MNQ"),
@@ -99,8 +109,10 @@ class Hive:
         for rec in store.top(400):
             self.records[rec["spec"]["uid"]] = rec
         if self.records:
-            self.best = max(self.records.values(), key=lambda r: r["result"]["fitness"])
-            self.last_cycle_best = self.best["result"]["fitness"]
+            self.best = max(self.records.values(), key=score)
+            self.last_cycle_best = score(self.best)
+        self.robust_queue: list = []
+        self.robust_queued: set[str] = set()
         for a in store.load_agents():
             agent = ag.Agent(**{k: v for k, v in a.items() if k in ag.Agent.__dataclass_fields__})
             if agent.alive:
@@ -130,6 +142,7 @@ class Hive:
                 self._start_drone(a)
         self.tasks = [
             asyncio.create_task(self._evolver_loop(), name="evolver"),
+            asyncio.create_task(self._robust_loop(), name="robustness"),
             asyncio.create_task(self._overmind_loop(), name="overmind"),
             asyncio.create_task(self._housekeeping_loop(), name="housekeeping"),
         ]
@@ -209,6 +222,8 @@ class Hive:
         if keep:
             self.store.save_results(keep)
         batch_fits: list[float] = []
+        floor = self._elite_floor()
+        cut = self._leader_cut(ROBUST_TOP)
         for spec, res in pairs:
             uid = spec["uid"]
             if uid not in self.seen:
@@ -223,26 +238,24 @@ class Hive:
             niche = self.niches.setdefault(f"{spec['family']} / {spec['instrument']}", [0, 0.0])
             niche[0] += 1
             niche[1] = max(niche[1], fit)
-            if len(self.records) < 400 or fit > self._elite_floor():
-                self.records[spec["uid"]] = {"spec": spec, "result": res, "t": now}
-            if self.best is None or fit > self.best["result"]["fitness"] + 1e-9:
-                prev = self.best["result"]["fitness"] if self.best else 0.0
-                self.best = {"spec": spec, "result": res, "t": now}
-                self.best_history.append([round(now, 1), round(fit, 4), round(res["val"]["pass_mc"], 4),
-                                          round(res["test"]["pass_mc"], 4), self.tested])
-                if fit > prev + 0.004:
-                    self.bus.emit(
-                        "champion",
-                        f"New champion: {spec['name']} by {spec.get('author', '?')} | fitness {fit:.3f} | validation pass {res['val']['pass_mc']:.0%} | holdout {res['test']['pass_mc']:.0%}",
-                        uid=spec["uid"], fitness=fit,
-                    )
+            if len(self.records) < 400 or fit * UNVERIFIED > floor:
+                self.records[uid] = {"spec": spec, "result": res, "t": now}
+                if fit >= 0.05 and fit * UNVERIFIED > cut and uid not in self.robust_queued:
+                    prio = fit * (0.5 if spec.get("origin") == "neighbor" else 1.0)
+                    heapq.heappush(self.robust_queue, (-prio, uid))
+                    self.robust_queued.add(uid)
         if batch_fits:  # thin the scatter: the batch best plus one random sample keeps minutes of history on screen
             picks = {max(batch_fits), batch_fits[int(self.rng.integers(len(batch_fits)))]}
             for f in picks:
                 self.scatter.append([round(now, 1), round(f, 4)])
         if len(self.records) > 520:
-            top = sorted(self.records.values(), key=lambda r: r["result"]["fitness"], reverse=True)[:400]
+            top = sorted(self.records.values(), key=score, reverse=True)[:400]
             self.records = {r["spec"]["uid"]: r for r in top}
+        if len(self.robust_queue) > 200:
+            self.robust_queue = heapq.nsmallest(150, self.robust_queue)
+            heapq.heapify(self.robust_queue)
+            self.robust_queued = {u for _, u in self.robust_queue}
+        self._update_best(now)
         while len(self.seen_fifo) > SEEN_CAP:
             self.seen.discard(self.seen_fifo.popleft())
         self.rate.append((now, self.tested))
@@ -250,11 +263,64 @@ class Hive:
     def _elite_floor(self) -> float:
         if len(self.records) < 400:
             return -1.0
-        fits = sorted((r["result"]["fitness"] for r in self.records.values()), reverse=True)
-        return fits[399] if len(fits) > 399 else -1.0
+        scores = sorted((score(r) for r in self.records.values()), reverse=True)
+        return scores[399] if len(scores) > 399 else -1.0
+
+    def _leader_cut(self, n: int) -> float:
+        scores = sorted((score(r) for r in self.records.values()), reverse=True)
+        return scores[n - 1] if len(scores) >= n else 0.0
+
+    def _update_best(self, now: float) -> None:
+        if not self.records:
+            return
+        top = max(self.records.values(), key=score)
+        prev = score(self.best) if self.best else 0.0
+        new = score(top)
+        changed = self.best is None or top["spec"]["uid"] != self.best["spec"]["uid"]
+        self.best = top
+        if changed or abs(new - prev) > 1e-9:
+            res = top["result"]
+            self.best_history.append([round(now, 1), round(new, 4), round(res["val"]["pass_mc"], 4),
+                                      round(res["test"]["pass_mc"], 4), self.tested])
+        if new > prev + 0.004:
+            res, spec = top["result"], top["spec"]
+            checked = "robustness-checked" if "robust_score" in res else "robustness check pending"
+            self.bus.emit(
+                "champion",
+                f"New champion: {spec['name']} by {spec.get('author', '?')} | score {new:.3f} ({checked}) | validation pass {res['val']['pass_mc']:.0%} | holdout {res['test']['pass_mc']:.0%}",
+                uid=spec["uid"], fitness=new,
+            )
+
+    async def _robust_loop(self) -> None:
+        """Re-test leading strategies with slightly nudged settings; knife-edge strategies lose their rank."""
+        while not self.stopping:
+            await self.running.wait()
+            if not self.robust_queue:
+                await asyncio.sleep(0.5)
+                continue
+            _, uid = heapq.heappop(self.robust_queue)
+            self.robust_queued.discard(uid)
+            rec = self.records.get(uid)
+            if rec is None or "robust_score" in rec["result"]:
+                continue
+            try:
+                base = StrategySpec.from_dict(rec["spec"], self.inst_list, self.tfs)
+                results = await self.evaluate_batch(neighbors(base, self.rng, ROBUST_NEIGHBORS))
+                fits = [r["fitness"] for _, r in results if r.get("ok")]
+                own = rec["result"]["fitness"]
+                med = float(np.median(fits)) if len(fits) >= 3 else 0.0
+                rec["result"]["robust_score"] = 0.5 * own + 0.5 * min(own, med)
+                rec["result"]["robust"] = {"median": med, "min": float(min(fits)) if fits else 0.0, "n": len(fits)}
+                self.store.update_result(uid, rec["result"])
+                self._update_best(time.time())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("robustness check failed")
+                self.bus.emit("error", f"Robustness check error: {exc}", persist=False)
 
     def leaders(self, n: int = 25, diverse: bool = False) -> list[dict]:
-        ranked = sorted(self.records.values(), key=lambda r: r["result"]["fitness"], reverse=True)
+        ranked = sorted(self.records.values(), key=score, reverse=True)
         if not diverse:
             return ranked[:n]
         out, niche = [], {}
@@ -271,14 +337,29 @@ class Hive:
     # ------------------------------------------------------------------ evolver
     def _tournament(self, elite: list[dict], k: int = 3) -> StrategySpec:
         picks = [elite[int(i)] for i in self.rng.integers(0, len(elite), size=k)]
-        best = max(picks, key=lambda r: r["result"]["fitness"])
+        best = max(picks, key=score)
         return StrategySpec.from_dict(best["spec"], self.inst_list, self.tfs)
+
+    def _parent_pools(self) -> tuple[list[dict], list[list[dict]]]:
+        """Global elite plus per-niche elites, so several strategy families keep evolving at once."""
+        elite = self.leaders(240)
+        by_niche: dict[tuple, list[dict]] = {}
+        for r in elite:
+            group = by_niche.setdefault((r["spec"]["family"], r["spec"]["instrument"]), [])
+            if len(group) < 12:
+                group.append(r)
+        return elite[:80], list(by_niche.values())
+
+    def _parent(self, elite: list[dict], niches: list[list[dict]]) -> StrategySpec:
+        if len(niches) > 1 and self.rng.random() < 0.5:
+            return self._tournament(niches[int(self.rng.integers(len(niches)))])
+        return self._tournament(elite)
 
     async def _evolver_loop(self) -> None:
         while not self.stopping:
             await self.running.wait()
             try:
-                elite = self.leaders(80)
+                elite, niches = self._parent_pools()
                 explore = {"exploit": 0.06, "balanced": 0.15, "explore": 0.35}.get(self.evolver_focus, 0.15)
                 batch: list[StrategySpec] = []
                 for _ in range(self.cfg.ga_batch):
@@ -286,9 +367,9 @@ class Hive:
                     if len(elite) < 6 or r < explore:
                         batch.append(seeds.random_strategy(self.rng, self.inst_list, self.tfs, author="evolver"))
                     elif r < explore + 0.15:
-                        batch.append(crossover(self._tournament(elite), self._tournament(elite), self.rng, self.inst_list, self.tfs))
+                        batch.append(crossover(self._parent(elite, niches), self._parent(elite, niches), self.rng, self.inst_list, self.tfs))
                     else:
-                        batch.append(mutate(self._tournament(elite), self.rng, self.inst_list, self.tfs))
+                        batch.append(mutate(self._parent(elite, niches), self.rng, self.inst_list, self.tfs))
                 await self.evaluate_batch(batch, author="evolver")
             except asyncio.CancelledError:
                 raise
@@ -482,7 +563,7 @@ class Hive:
             "cycle": self.cycle,
             "elapsed_min": (time.time() - self.started + self.prior_elapsed) / 60,
             "tested": self.tested,
-            "best_fitness": best["fitness"] if best else 0.0,
+            "best_fitness": score(self.best) if self.best else 0.0,
             "best_val_pass": best["val"]["pass_mc"] if best else 0.0,
             "stagnation": self.stagnation,
             "patience": self.cfg.overmind_patience,
@@ -528,7 +609,7 @@ class Hive:
 
             # natural selection for the Overmind itself: stagnation is counted per full interval,
             # so extra wake-ups (drone deaths, operator orders) never count against it
-            best = self.best["result"]["fitness"] if self.best else 0.0
+            best = score(self.best) if self.best else 0.0
             now = time.time()
             if best > self.last_cycle_best + 0.003:
                 self.stagnation = 0
@@ -628,7 +709,10 @@ class Hive:
         return {
             "uid": s["uid"], "name": s["name"], "instrument": s["instrument"], "timeframe": s["timeframe"],
             "family": s["family"], "author": s.get("author", ""), "origin": s.get("origin", ""), "sides": "both" if s.get("long_entry") and s.get("short_entry") else ("long" if s.get("long_entry") else "short"),
-            "fitness": r["fitness"], "train_pass": r["train"]["pass_mc"], "val_pass": r["val"]["pass_mc"], "test_pass": r["test"]["pass_mc"],
+            "fitness": r["fitness"], "score": score(rec), "robust": "robust_score" in r,
+            "robust_median": (r.get("robust") or {}).get("median"),
+            "train_pass": r["train"]["pass_mc"], "val_pass": r["val"]["pass_mc"], "test_pass": r["test"]["pass_mc"],
+            "test_luck": r["test"].get("luck"), "test_fast": r["test"].get("pass_fast"), "fast_days": r.get("fast_days", 10),
             "test_hist_pass": r["test"]["pass_hist"], "median_days": r["val"]["median_days"],
             "trades": r["trades"], "win_rate": (r["train"]["win_rate"] + r["val"]["win_rate"]) / 2,
             "pf": min(r["val"]["profit_factor"], 99.0), "net": r["train"]["net"] + r["val"]["net"], "test_net": r["test"]["net"],
@@ -654,9 +738,14 @@ class Hive:
             },
             "stats": {
                 "tested": self.tested, "valid": self.valid, "rate_per_min": round(self.rate_per_min(), 1),
-                "best_fitness": best["fitness"] if best else 0.0,
+                "best_fitness": score(self.best) if self.best else 0.0,
+                "best_robust": bool(best and "robust_score" in best),
                 "best_val_pass": best["val"]["pass_mc"] if best else 0.0,
                 "best_test_pass": best["test"]["pass_mc"] if best else 0.0,
+                "best_test_luck": best["test"].get("luck") if best else None,
+                "best_test_fast": best["test"].get("pass_fast") if best else None,
+                "fast_days": self.rules.fast_days, "target_days": self.rules.target_days,
+                "robust_queue": len(self.robust_queue),
                 "best_uid": self.best["spec"]["uid"] if self.best else None,
                 "best_name": self.best["spec"]["name"] if self.best else None,
                 "elapsed": self.prior_elapsed + time.time() - self.started,
@@ -691,6 +780,9 @@ class Hive:
         if rec["result"].get("ok") and "equity" not in rec["result"]:
             loop = asyncio.get_running_loop()
             res = (await loop.run_in_executor(self.pool, evaluator.evaluate_many, [rec["spec"]]))[0]
+            for k in ("robust_score", "robust"):
+                if k in rec["result"]:
+                    res[k] = rec["result"][k]
             if res.get("ok"):
                 rec = {**rec, "result": res}
                 self.store.update_result(uid, res)

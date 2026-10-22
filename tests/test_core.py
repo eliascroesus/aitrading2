@@ -190,3 +190,48 @@ def test_evaluate_reports_bad_expression(ds):
     evaluator.init_local({ds.key: ds}, propfirm.get_rules("topstep_50k"), {}, mc_sims=50)
     res = evaluator.evaluate({"name": "x", "family": "other", "instrument": "MNQ", "timeframe": 5, "long_entry": "close > supertrend(3)"})
     assert not res["ok"] and "supertrend" in res["error"]
+
+
+# ------------------------------------------------------------------ robustness / luck / speed
+
+def test_neighbors_are_valid_small_variants():
+    from hive.strategy import neighbors
+    rng = np.random.default_rng(1)
+    for base in seeds.seed_strategies(["MNQ"], [5]):
+        nb = neighbors(base, rng, 6)
+        assert nb, base.name
+        for s in nb:
+            assert not s.errors()
+            assert s.uid != base.uid
+            assert (s.instrument, s.timeframe, s.family) == (base.instrument, base.timeframe, base.family)
+            assert s.origin == "neighbor"
+
+
+def test_luck_baseline_separates_edge_from_volatility():
+    rng = np.random.default_rng(0)
+    rules = propfirm.get_rules("topstep_50k")
+    noise = rng.normal(0, 600, 400)
+    zero_edge = _days(noise)
+    edge = _days(noise + 250)
+    assert propfirm.luck_baseline(rules, edge, np.random.default_rng(1)) < propfirm.pass_probability_mc(rules, edge, np.random.default_rng(1))["pass"] - 0.2
+    luck0 = propfirm.luck_baseline(rules, zero_edge, np.random.default_rng(2))
+    pass0 = propfirm.pass_probability_mc(rules, zero_edge, np.random.default_rng(2))["pass"]
+    assert abs(luck0 - pass0) < 0.15
+
+
+def test_target_days_from_env(monkeypatch):
+    monkeypatch.setenv("PROP_TARGET_DAYS", "7")
+    rules = propfirm.get_rules("topstep_50k")
+    assert rules.target_days == 7 and rules.fast_days == 7
+    monkeypatch.setenv("PROP_TARGET_DAYS", "")
+    assert propfirm.get_rules("topstep_50k").target_days is None
+
+
+def test_evaluate_reports_luck_speed_and_complexity(ds):
+    evaluator.init_local({ds.key: ds}, propfirm.get_rules("topstep_50k"), {}, mc_sims=100)
+    res = evaluator.evaluate(seeds.seed_strategies(["MNQ"], [5])[0].to_dict())
+    assert res["ok"]
+    for seg in ("train", "val", "test"):
+        assert 0.0 <= res[seg]["luck"] <= 1.0
+        assert 0.0 <= res[seg]["pass_fast"] <= res[seg]["pass_mc"] + 1e-9
+    assert res["conditions"] >= 1 and res["fast_days"] == 10

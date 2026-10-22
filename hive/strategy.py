@@ -240,7 +240,7 @@ def mutate(spec: StrategySpec, rng: np.random.Generator, instruments: list[str],
 
 
 def root_name(name: str) -> str:
-    return name.split(" ·")[0].split(" ⨯ ")[0].strip()[:44]
+    return name.split(" ·")[0].split(" ⨯ ")[0].split(" ~n")[0].strip()[:44]
 
 
 def _child_name(name: str) -> str:
@@ -352,6 +352,54 @@ def _replace_const(expr: str, idx: int, value) -> str:
     nodes = _constants_in_tree(tree)
     nodes[idx][0].value = value
     return ast.unparse(tree)
+
+
+def _nudge(value: float, kind: str, rng: np.random.Generator) -> float:
+    """A small parameter change, used to check that a strategy is not balanced on a knife edge."""
+    step = float(rng.choice([-1.0, 1.0]))
+    if kind == lang.P:
+        if value >= 7:
+            return float(max(1, round(value * (1 + step * float(rng.choice([0.1, 0.15]))))))
+        return float(max(1.0, value + step))
+    if kind == lang.M:
+        return float(max(1.0, value + 5 * step))
+    if kind == lang.T:
+        return float(min(1440.0, max(0.0, value + step * float(rng.choice([5, 10])))))
+    if kind == "I" or abs(value) < 1e-12:
+        return float(value)
+    return round(float(value) * (1 + step * float(rng.choice([0.05, 0.1]))), 6)
+
+
+def neighbors(spec: StrategySpec, rng: np.random.Generator, n: int = 6) -> list[StrategySpec]:
+    """Variants with every numeric setting nudged slightly (same logic, market and timeframe)."""
+    out: list[StrategySpec] = []
+    seen = {spec.uid}
+    for _ in range(n * 4):
+        s = StrategySpec(**asdict(spec))
+        for key in ("long_entry", "short_entry", "exit_when"):
+            expr = getattr(s, key)
+            if not expr:
+                continue
+            tree = ast.parse(expr, mode="eval")
+            for node, kind in _constants_in_tree(tree):
+                if rng.random() < 0.5:
+                    v = _nudge(float(node.value), kind, rng)
+                    node.value = int(v) if kind in (lang.P, lang.M, lang.T, "I") else v
+            setattr(s, key, ast.unparse(tree))
+        s.stop_value = float(s.stop_value) * (1 + float(rng.choice([-0.1, 0.0, 0.1])))
+        if s.target_type != "none":
+            s.target_value = float(s.target_value) * (1 + float(rng.choice([-0.1, 0.0, 0.1])))
+        s.risk_usd = float(s.risk_usd) * (1 + float(rng.choice([-0.1, 0.0, 0.1])))
+        s = s.normalized()
+        if s.errors() or s.uid in seen:
+            continue
+        seen.add(s.uid)
+        s.origin, s.author, s.parents, s.rationale = "neighbor", "robustness", spec.uid, ""
+        s.name = f"{root_name(spec.name)} ~n"
+        out.append(s)
+        if len(out) >= n:
+            break
+    return out
 
 
 def crossover(a: StrategySpec, b: StrategySpec, rng: np.random.Generator, instruments: list[str], timeframes: list[int]) -> StrategySpec:
