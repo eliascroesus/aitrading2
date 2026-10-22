@@ -1,0 +1,10 @@
+anthropic>=2.1,<3
+alpaca-py>=0.44
+fastapi>=0.115
+uvicorn[standard]>=0.30
+numpy>=1.26
+pandas>=2.1
+python-dotenv>=1.0
+# optional
+# yfinance>=0.2     # DATA_SOURCE=yahoo (real continuous futures, ~60 days of 5m history)
+# pytest>=8         # running the test suite

@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HIVEMIND</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2l12 7v14l-12 7-12-7V9z' fill='%23f5b544'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="boot" class="boot">
+    <div class="boot-card">
+      <div class="hexspin"><span></span><span></span><span></span></div>
+      <h1>HIVEMIND</h1>
+      <p id="boot-stage">Connecting to the hive…</p>
+      <pre id="boot-log"></pre>
+    </div>
+  </div>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2l12 7v14l-12 7-12-7V9z"/><path class="inner" d="M16 9l6 3.5v7L16 23l-6-3.5v-7z"/></svg>
+      <span class="wordmark">HIVEMIND</span>
+      <span id="conn" class="conn" title="live connection"></span>
+    </div>
+    <div class="chips">
+      <span id="status-pill" class="pill">—</span>
+      <span id="objective-chip" class="chip" title="">—</span>
+      <span id="data-chip" class="chip">—</span>
+      <span id="model-chip" class="chip">—</span>
+    </div>
+    <div class="actions">
+      <button id="pause-btn" class="btn">Pause</button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="kpis">
+      <div class="kpi">
+        <div class="kpi-label">Strategies tested</div>
+        <div class="kpi-value mono" id="k-tested">0</div>
+        <div class="kpi-sub" id="k-rate">— / min</div>
+      </div>
+      <div class="kpi accent">
+        <div class="kpi-label">Best pass probability <span class="hint" title="Monte Carlo pass rate of the champion on the validation segment">validation</span></div>
+        <div class="kpi-value mono" id="k-val">—</div>
+        <div class="kpi-sub" id="k-fit">fitness —</div>
+      </div>
+      <div class="kpi good">
+        <div class="kpi-label">Holdout pass rate <span class="hint" title="Data the hive never selects on. The honest estimate.">untouched</span></div>
+        <div class="kpi-value mono" id="k-test">—</div>
+        <div class="kpi-sub" id="k-attempts">— attempts to pass</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Agents</div>
+        <div class="kpi-value mono" id="k-agents">—</div>
+        <div class="kpi-sub" id="k-deaths">— deleted</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Overmind</div>
+        <div class="kpi-value mono" id="k-om">—</div>
+        <div class="kpi-sub" id="k-stag">stagnation —</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">Claude spend</div>
+        <div class="kpi-value mono" id="k-spend">$0.00</div>
+        <div class="kpi-sub" id="k-calls">0 calls</div>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card span-8" id="evolution-card">
+        <div class="card-head">
+          <h2>Evolution</h2>
+          <div class="legend">
+            <span><i class="sw sw-best"></i>best fitness</span>
+            <span><i class="sw sw-val"></i>champion validation pass</span>
+            <span><i class="sw sw-test"></i>champion holdout pass</span>
+            <span><i class="sw sw-dot"></i>tested strategies</span>
+          </div>
+        </div>
+        <div class="chart-box"><canvas id="evo-chart"></canvas><div id="evo-tip" class="tip"></div></div>
+        <div class="champion-strip" id="champion-strip"></div>
+      </article>
+
+      <article class="card span-4" id="hive-card">
+        <div class="card-head">
+          <h2>The Hive</h2>
+          <span class="muted small" id="hive-sub"></span>
+        </div>
+        <div id="agents" class="agents"></div>
+      </article>
+
+      <article class="card span-8" id="board-card">
+        <div class="card-head">
+          <h2>Strategy leaderboard</h2>
+          <div class="seg" id="board-mode">
+            <button data-mode="all" class="on">All</button>
+            <button data-mode="niche">Best per niche</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="board">
+            <thead>
+              <tr>
+                <th data-sort="rank">#</th>
+                <th data-sort="name" class="left">Strategy</th>
+                <th data-sort="instrument">Market</th>
+                <th data-sort="family">Family</th>
+                <th data-sort="fitness">Fitness</th>
+                <th data-sort="val_pass">Val pass</th>
+                <th data-sort="test_pass">Holdout</th>
+                <th data-sort="median_days">Days</th>
+                <th data-sort="trades">Trades</th>
+                <th data-sort="win_rate">Win</th>
+                <th data-sort="pf">PF</th>
+                <th data-sort="net">Net (tr+val)</th>
+              </tr>
+            </thead>
+            <tbody id="board"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="card span-4" id="feed-card">
+        <div class="card-head">
+          <h2>Live feed</h2>
+          <div class="seg small" id="feed-filter">
+            <button data-f="key" class="on">Key</button>
+            <button data-f="all">All</button>
+            <button data-f="agents">Agents</button>
+            <button data-f="errors">Errors</button>
+          </div>
+        </div>
+        <div id="feed" class="feed"></div>
+      </article>
+
+      <article class="card span-6" id="paper-card">
+        <div class="card-head">
+          <h2>Alpaca paper trading</h2>
+          <span id="paper-badge" class="pill small">—</span>
+        </div>
+        <div id="paper"></div>
+      </article>
+
+      <article class="card span-3" id="memory-card">
+        <div class="card-head"><h2>Hive memory</h2></div>
+        <div id="directive" class="directive"></div>
+        <ul id="memory" class="memory"></ul>
+      </article>
+
+      <article class="card span-3" id="grave-card">
+        <div class="card-head"><h2>Graveyard</h2><span class="muted small" id="grave-sub"></span></div>
+        <ul id="graveyard" class="grave"></ul>
+      </article>
+    </section>
+  </main>
+
+  <footer class="command">
+    <div class="command-inner">
+      <span class="prompt-glyph">⬢</span>
+      <input id="order-input" type="text" placeholder="Give the Overmind an order, e.g. “focus on MNQ opening range with tighter daily loss stops”" maxlength="500" autocomplete="off">
+      <button id="order-send" class="btn primary">Send</button>
+    </div>
+  </footer>
+
+  <aside id="drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <div class="drawer-kicker" id="d-kicker"></div>
+        <h3 id="d-title">Strategy</h3>
+      </div>
+      <button class="icon-btn" id="d-close" aria-label="close">✕</button>
+    </div>
+    <div class="drawer-body" id="d-body"></div>
+  </aside>
+  <div id="scrim" class="scrim"></div>
+  <div id="toast" class="toast"></div>
+
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>

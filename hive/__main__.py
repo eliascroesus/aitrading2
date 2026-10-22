@@ -1,0 +1,27 @@
+"""Entry point: ``python -m hive``"""
+from __future__ import annotations
+
+import logging
+
+
+def main() -> None:
+    import uvicorn
+
+    from .config import load_config
+    from .server import create_app
+
+    cfg = load_config()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    mode = "Claude agents" if not cfg.offline else "OFFLINE mode (no ANTHROPIC_API_KEY): procedural agents"
+    print(
+        "\n  HIVEMIND\n"
+        f"  objective : {cfg.prop_preset}\n"
+        f"  agents    : {mode}\n"
+        f"  data      : {cfg.resolved_data_source} | {', '.join(cfg.instruments)} | {cfg.timeframes} min\n"
+        f"  dashboard : http://{cfg.host}:{cfg.port}\n"
+    )
+    uvicorn.run(create_app(cfg), host=cfg.host, port=cfg.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()
