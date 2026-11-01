@@ -15,7 +15,8 @@ def main() -> None:
 
     cfg = load_config()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    mode = "Claude agents" if not cfg.offline else "OFFLINE mode (no ANTHROPIC_API_KEY): procedural agents"
+    mode = ("FREE mode: no Claude (switch on the dashboard)" if cfg.offline
+            else {"full": "Claude agents, always on", "economy": "Claude economy mode"}.get(cfg.claude_mode, "Claude agents"))
     print(
         "\n  HIVEMIND\n"
         f"  objective : {cfg.prop_preset}\n"

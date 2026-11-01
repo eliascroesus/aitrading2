@@ -296,6 +296,8 @@ Read the state, decide what is working and what is not, then: write a directive 
 
 def fmt_metrics(r: dict) -> str:
     t, v = r["train"], r["val"]
+    if r.get("screened"):
+        return f"screened out: loses money or barely trades on train (net ${t['net']:,.0f} over {t['trades']} trades)"
     md = v.get("median_days")
     folds = "/".join(f"{x:.0%}" for x in r.get("folds", []))
     return (

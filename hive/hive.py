@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import logging
+import os
 import multiprocessing as mp
 import time
 from collections import deque
@@ -26,6 +27,8 @@ log = logging.getLogger("hive.core")
 STORE_MIN_FITNESS = 0.02  # strategies below this are counted but not written to disk
 STORE_MAX_ROWS = 20_000  # database keeps the best this many strategies
 SEEN_CAP = 250_000  # how many recent strategy fingerprints are remembered for de-duplication
+MODES = ("full", "economy", "off")  # Claude always on / only when useful / never (free)
+OPERATORS = ("mutate", "tune", "crossover", "transplant", "random")
 UNVERIFIED = 0.85  # score multiplier until a strategy has survived the robustness check
 ROBUST_NEIGHBORS = 6  # nudged variants evaluated per robustness check
 ROBUST_TOP = 30  # strategies that could enter the top this many get checked
@@ -63,7 +66,16 @@ class Hive:
         self.tfs = sorted({d.timeframe for d in datasets.values()})
         self.rng = np.random.default_rng(cfg.seed + int(time.time()) % 100000)
         self.datasets_meta = {k: d.summary() for k, d in datasets.items()}
-        self.llm = None if cfg.offline else LLM(cfg.anthropic_api_key, cfg.llm_fallbacks, cfg.llm_budget_usd, cfg.llm_concurrency)
+        # the Claude client exists whenever a key is set; the dashboard toggle decides whether it is used
+        self.llm = LLM(cfg.anthropic_api_key, cfg.llm_fallbacks, cfg.llm_budget_usd, cfg.llm_concurrency) if cfg.anthropic_api_key else None
+        mode = store.kv_get("claude_mode", cfg.claude_mode)
+        self.mode = mode if mode in MODES else "full"
+        if self.llm is None:
+            self.mode = "off"
+        self.speed = store.kv_get("speed", "normal")
+        self.workers = self._workers_for(self.speed)
+        self.op_stats: dict[str, list[float]] = {op: [0.0, 0.0] for op in OPERATORS}  # decayed [successes, trials]
+        self.adaptive_ops = True
         self.pool: ProcessPoolExecutor | None = None
         self.paper = None  # set by the server when Alpaca is configured
 
@@ -117,7 +129,6 @@ class Hive:
         self.robust_queue: list = []
         self.robust_queued: set[str] = set()
         # economy mode: Claude is used for idea bursts, operator orders and prop-ready reviews only
-        self.economy = cfg.claude_mode != "full"
         self.last_improve_t = time.time()
         self.last_burst_t = 0.0
         self.burst_until = 0.0
@@ -138,16 +149,56 @@ class Hive:
                 self.graveyard.append(agent.to_dict())
 
     # ------------------------------------------------------------------ lifecycle
+    @property
+    def claude_on(self) -> bool:
+        return self.llm is not None and self.mode != "off"
+
+    @property
+    def economy(self) -> bool:
+        return self.claude_on and self.mode == "economy"
+
+    def _workers_for(self, speed: str) -> int:
+        cores = os.cpu_count() or 2
+        return max(1, cores - 1) if speed == "turbo" else self.cfg.workers
+
+    def set_mode(self, mode: str) -> None:
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {', '.join(MODES)}")
+        if mode != "off" and self.llm is None:
+            raise ValueError("add ANTHROPIC_API_KEY to .env to use Claude")
+        if mode == self.mode:
+            return
+        self.mode = mode
+        self.store.kv_set("claude_mode", mode)
+        label = {"full": "Claude always on", "economy": "Claude economy (idea bursts + reviews)", "off": "FREE (no Claude)"}[mode]
+        self.bus.emit("system", f"Mode switched to {label}.")
+        if mode == "economy":
+            self.last_improve_t = time.time()
+        self.overmind_llm_due = mode != "off"
+        self.wake_overmind.set()
+
+    def set_speed(self, speed: str) -> None:
+        if speed not in ("normal", "turbo"):
+            raise ValueError("speed must be normal or turbo")
+        self.speed = speed
+        self.store.kv_set("speed", speed)
+        n = self._workers_for(speed)
+        if n != self.workers and self.pool is not None:
+            self.workers = n
+            old, self.pool = self.pool, self._make_pool()
+            old.shutdown(wait=False)
+        self.bus.emit("system", f"Speed: {speed} ({self.workers} backtest workers).")
+
     def _make_pool(self) -> ProcessPoolExecutor:
         return ProcessPoolExecutor(
-            max_workers=self.cfg.workers, mp_context=mp.get_context("spawn"), initializer=evaluator.init_worker,
-            initargs=(self.dataset_files, self.rules.to_dict(), self.cfg.ratio_overrides),
+            max_workers=self.workers, mp_context=mp.get_context("spawn"), initializer=evaluator.init_worker,
+            initargs=(self.dataset_files, self.rules.to_dict(), self.cfg.ratio_overrides, 400, self.cfg.prescreen),
         )
 
     async def start(self) -> None:
         self.pool = self._make_pool()
-        mode = "Claude agents" if self.llm else "OFFLINE procedural agents (set ANTHROPIC_API_KEY for Claude)"
-        self.bus.emit("system", f"Hive online: {len(self.datasets)} datasets, {self.cfg.workers} workers, {mode}. Objective: {self.rules.name}.")
+        mode = {"full": "Claude agents (always on)", "economy": "Claude economy mode", "off": "FREE mode (no Claude)"}[self.mode]
+        self.bus.emit("system", f"Hive online: {len(self.datasets)} datasets, {self.workers} workers, {mode}. Objective: {self.rules.name}.")
         if not self.records:
             await self.evaluate_batch(seeds.seed_strategies(self.inst_list, self.tfs), author="seed")
             self.bus.emit("system", f"Seeded {len(self.records)} strategies from the research library.")
@@ -156,7 +207,7 @@ class Hive:
         for a in list(self.agents.values()):
             if a.kind == "drone" and a.alive:
                 self._start_drone(a)
-        if self.llm and self.economy:
+        if self.economy:
             self._trigger_burst("hive started: give the drones one round to seed new ideas", force=True)
         self.tasks = [
             asyncio.create_task(self._evolver_loop(), name="evolver"),
@@ -193,7 +244,7 @@ class Hive:
         self.operator_notes = self.operator_notes[-10:]
         self.store.kv_set("operator_notes", self.operator_notes)
         self.bus.emit("operator", f"Operator order: {text}")
-        if self.llm and self.economy:
+        if self.economy:
             self._trigger_burst(f"operator order: {text[:200]}", force=True)
         self.wake_overmind.set()
 
@@ -202,7 +253,7 @@ class Hive:
         now = time.time()
         if not force and now - self.last_burst_t < self.cfg.burst_cooldown_min * 60:
             return False
-        if self.llm and self.llm.over_budget():
+        if not self.claude_on or self.llm.over_budget():
             return False
         self.last_burst_t = now
         self.burst_until = now + 300  # drones spawned in the next 5 minutes also get a round
@@ -219,7 +270,7 @@ class Hive:
         """Wakes Claude only when the free evolver has stalled for a while."""
         while not self.stopping:
             await asyncio.sleep(self.loop_interval)
-            if not (self.llm and self.economy) or not self.running.is_set():
+            if not self.economy or not self.running.is_set():
                 continue
             stalled = time.time() - self.last_improve_t
             if stalled >= self.cfg.burst_after_min * 60:
@@ -255,7 +306,7 @@ class Hive:
                     if key in newly:
                         names = " + ".join(sp["name"] for sp in specs)
                         self.bus.emit("champion", f"PROP-READY {kind}: {names} (meets every readiness rule on untouched data)", uid=key)
-                if not (self.llm and self.cfg.prop_reviews) or self.llm.over_budget():
+                if not (self.claude_on and self.cfg.prop_reviews) or self.llm.over_budget():
                     continue
                 for key, kind, specs, result in ready[:3]:
                     if key in self.reviews:
@@ -579,24 +630,79 @@ class Hive:
             return self._tournament(niches[int(self.rng.integers(len(niches)))])
         return self._tournament(elite)
 
+    def _fit_of(self, spec: StrategySpec) -> float:
+        rec = self.records.get(spec.uid)
+        return rec["result"]["fitness"] if rec else 0.0
+
+    def _op_weights(self) -> dict[str, float]:
+        """Adaptive operator selection: each move is used in proportion to how often its children beat their
+        parents (a brand-new idea counts when it is good enough for the top 50). A fixed mix is used when
+        adaptive_ops is off."""
+        if not self.adaptive_ops:
+            w = {"mutate": 0.62, "tune": 0.0, "crossover": 0.15, "transplant": 0.08, "random": 0.15}
+        else:
+            rates = {op: (succ + 1.0) / (trials + 10.0) for op, (succ, trials) in self.op_stats.items()}
+            w = {op: max(0.02, r) for op, r in rates.items()}
+        w["random"] *= {"exploit": 0.5, "balanced": 1.0, "explore": 2.5}.get(self.evolver_focus, 1.0)
+        total = sum(w.values())
+        return {op: v / total for op, v in w.items()}
+
+    def _learn_ops(self, results: list[tuple[dict, dict]], origin: dict[str, tuple[str, float]]) -> None:
+        for stats in self.op_stats.values():  # forget slowly so the mix keeps adapting
+            stats[0] *= 0.995
+            stats[1] *= 0.995
+        for spec, res in results:
+            entry = origin.get(spec["uid"])
+            if entry is None or not res.get("ok"):
+                continue
+            op, bar = entry
+            self.op_stats[op][1] += 1
+            if res["fitness"] > bar + 0.002:
+                self.op_stats[op][0] += 1
+
+    def _op_mix(self) -> dict[str, dict]:
+        weights = self._op_weights()
+        return {op: {"weight": round(weights[op], 3), "hit_rate": round(succ / trials, 4) if trials else 0.0}
+                for op, (succ, trials) in self.op_stats.items()}
+
     async def _evolver_loop(self) -> None:
         while not self.stopping:
             await self.running.wait()
             try:
                 elite, niches = self._parent_pools()
-                explore = {"exploit": 0.06, "balanced": 0.15, "explore": 0.35}.get(self.evolver_focus, 0.15)
+                weights = self._op_weights()
+                ops = list(weights)
+                probs = np.array([weights[o] for o in ops])
+                cut = self._leader_cut(50) / UNVERIFIED  # fitness a brand-new idea needs to count as a success
                 batch: list[StrategySpec] = []
+                origin: dict[str, tuple[str, float]] = {}
                 for _ in range(self.cfg.ga_batch):
-                    r = self.rng.random()
-                    if len(elite) < 6 or r < explore:
-                        batch.append(seeds.random_strategy(self.rng, self.inst_list, self.tfs, author="evolver"))
-                    elif r < explore + 0.08:  # new idea on proven exits/sizing: cheap structural exploration
-                        batch.append(seeds.transplant(self._parent(elite, niches), self.rng, self.inst_list, self.tfs))
-                    elif r < explore + 0.23:
-                        batch.append(crossover(self._parent(elite, niches), self._parent(elite, niches), self.rng, self.inst_list, self.tfs))
+                    op = "random" if len(elite) < 6 else str(self.rng.choice(ops, p=probs))
+                    bar = cut
+                    if op == "random":
+                        child = seeds.random_strategy(self.rng, self.inst_list, self.tfs, author="evolver")
+                    elif op == "transplant":  # new idea on proven exits/sizing: cheap structural exploration
+                        parent = self._parent(elite, niches)
+                        bar = self._fit_of(parent)
+                        child = seeds.transplant(parent, self.rng, self.inst_list, self.tfs)
+                    elif op == "crossover":
+                        a, b = self._parent(elite, niches), self._parent(elite, niches)
+                        bar = max(self._fit_of(a), self._fit_of(b))
+                        child = crossover(a, b, self.rng, self.inst_list, self.tfs)
+                    elif op == "tune":  # nudge every setting of a leader a little: local hill-climbing
+                        parent = self._parent(elite, niches)
+                        bar = self._fit_of(parent)
+                        nb = neighbors(parent, self.rng, 1)
+                        child = nb[0] if nb else mutate(parent, self.rng, self.inst_list, self.tfs)
+                        child.origin, child.author = "tune", "evolver"
                     else:
-                        batch.append(mutate(self._parent(elite, niches), self.rng, self.inst_list, self.tfs))
-                await self.evaluate_batch(batch, author="evolver")
+                        parent = self._parent(elite, niches)
+                        bar = self._fit_of(parent)
+                        child = mutate(parent, self.rng, self.inst_list, self.tfs)
+                    origin[child.uid] = (op, bar)
+                    batch.append(child)
+                results = await self.evaluate_batch(batch, author="evolver")
+                self._learn_ops(results, origin)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # keep evolving no matter what
@@ -614,10 +720,10 @@ class Hive:
         if len(alive) >= self.cfg.max_drones:
             return None
         focus = focus if focus in self.inst_list else "any"
-        agent = ag.new_agent("drone", self.cfg.drone_model if self.llm else "procedural", self.overmind_gen,
+        agent = ag.new_agent("drone", self.cfg.drone_model if self.claude_on else "rule-based", self.overmind_gen,
                              specialty, mission, focus, name, spawned_by=by)
         self.agents[agent.id] = agent
-        if self.llm and self.economy and time.time() < self.burst_until:
+        if self.economy and time.time() < self.burst_until:
             self.drone_credits[agent.id] = self.cfg.burst_rounds
         self.store.save_agent(agent.to_dict())
         self.bus.emit("spawn", f"{by or 'Hive'} spawned drone {agent.name}: {specialty} (focus {focus})", agent=agent.id)
@@ -643,27 +749,29 @@ class Hive:
         consecutive_errors = 0
         while not self.stopping and agent.alive:
             await self.running.wait()
-            if self.llm and self.economy:
+            if self.economy:
                 if self.drone_credits.get(agent.id, 0) <= 0:
                     agent.status = "sleeping"
                     await asyncio.sleep(2)
                     continue
                 self.drone_credits[agent.id] -= 1
-            if self.llm and self.llm.over_budget():
+            if self.claude_on and self.llm.over_budget():
                 agent.status = "idle"
                 agent.last_thought = "Waiting: LLM budget reached (raise HIVE_LLM_BUDGET_USD)."
                 await asyncio.sleep(15)
                 continue
             agent.status = "thinking"
             try:
-                if self.llm:
+                if self.claude_on:
                     leaders = self.leaders(8, diverse=True)
                     user = ag.drone_user_prompt(agent, self.directive, self.operator_notes, self.memory, leaders,
                                                 self.cfg.strategies_per_round, self.cfg.drone_max_strikes)
-                    data, cost = await self.llm.json_call(model=agent.model, system=self.drone_system, user=user,
+                    agent.model = self.cfg.drone_model
+                    data, cost = await self.llm.json_call(model=self.cfg.drone_model, system=self.drone_system, user=user,
                                                           schema=self.drone_schema, effort=self.cfg.drone_effort)
                     agent.cost_usd += cost
                 else:
+                    agent.model = "rule-based"
                     await asyncio.sleep(3 + 4 * self.rng.random())
                     data = self._procedural_drone_round(agent)
                 consecutive_errors = 0
@@ -693,7 +801,7 @@ class Hive:
 
             feedback, specs = [], []
             for raw in (data.get("strategies") or [])[: max(1, self.cfg.strategies_per_round)]:
-                spec = StrategySpec.from_dict({**raw, "author": agent.id, "origin": "llm" if self.llm else "procedural"},
+                spec = StrategySpec.from_dict({**raw, "author": agent.id, "origin": "llm" if self.claude_on else "procedural"},
                                               self.inst_list, self.tfs)
                 errs = spec.errors()
                 if errs:
@@ -745,7 +853,7 @@ class Hive:
                 self.kill(agent, f"no improvement for {agent.strikes} consecutive rounds (best {agent.best_fitness:.3f})")
                 self.wake_overmind.set()
                 return
-            await asyncio.sleep(self.cfg.drone_cooldown_sec if self.llm else 0.5)
+            await asyncio.sleep(self.cfg.drone_cooldown_sec if self.claude_on else 0.5)
 
     def _procedural_drone_round(self, agent: ag.Agent) -> dict:
         """Offline stand-in for an LLM drone: templates plus targeted mutations of the leaders."""
@@ -776,7 +884,7 @@ class Hive:
     def _spawn_overmind(self, post_mortem: str = "") -> ag.Agent:
         self.overmind_gen += 1
         self.store.kv_set("overmind_gen", self.overmind_gen)
-        om = ag.new_agent("overmind", self.cfg.overmind_model if self.llm else "procedural", self.overmind_gen,
+        om = ag.new_agent("overmind", self.cfg.overmind_model if self.claude_on else "rule-based", self.overmind_gen,
                           specialty="hive operator", mission="Maximise challenge pass probability")
         self.agents[om.id] = om
         self.store.save_agent(om.to_dict())
@@ -824,12 +932,13 @@ class Hive:
             om.status = "thinking"
             self.cycle += 1
             decision = None
-            use_llm = bool(self.llm) and not self.llm.over_budget() and (not self.economy or self.overmind_llm_due)
+            use_llm = self.claude_on and not self.llm.over_budget() and (self.mode == "full" or self.overmind_llm_due)
+            om.model = self.cfg.overmind_model if use_llm else "rule-based"
             try:
                 if use_llm:
                     self.overmind_llm_due = False
                     decision, cost = await self.llm.json_call(
-                        model=om.model, system=self.overmind_system, user=ag.overmind_user_prompt(self._overmind_state()),
+                        model=self.cfg.overmind_model, system=self.overmind_system, user=ag.overmind_user_prompt(self._overmind_state()),
                         schema=self.overmind_schema, effort=self.cfg.overmind_effort,
                     )
                     om.cost_usd += cost
@@ -970,7 +1079,8 @@ class Hive:
             "t": time.time(),
             "status": "running" if self.running.is_set() else "paused",
             "mode": {
-                "llm": "claude" if self.llm else "offline",
+                "llm": "claude" if self.claude_on else "free",
+                "claude_available": self.llm is not None, "speed": self.speed,
                 "overmind_model": self.cfg.overmind_model, "drone_model": self.cfg.drone_model,
                 "data": next(iter(self.datasets_meta.values()))["source"] if self.datasets_meta else "?",
                 "preset": self.rules.key, "rules_name": self.rules.name, "rules_text": self.rules.describe(),
@@ -988,7 +1098,8 @@ class Hive:
                 "best_test_luck_fast": best["test"].get("luck_fast") if best else None,
                 "fast_days": self.rules.fast_days, "target_days": self.rules.target_days,
                 "robust_queue": len(self.robust_queue),
-                "claude_mode": "economy" if self.economy else "full",
+                "claude_mode": self.mode,
+                "evolver_mix": self._op_mix(),
                 "stalled_min": round((time.time() - self.last_improve_t) / 60, 1),
                 "burst_after_min": self.cfg.burst_after_min,
                 "burst_active": self.overmind_llm_due or any(v > 0 for v in self.drone_credits.values())
@@ -1006,7 +1117,7 @@ class Hive:
                 "budget": self.cfg.llm_budget_usd,
                 "llm_calls": self.llm.usage.calls if self.llm else 0,
                 "evolver_focus": self.evolver_focus,
-                "workers": self.cfg.workers,
+                "workers": self.workers,
             },
             "agents": [a.to_dict() for a in sorted(self.agents.values(), key=lambda a: (a.kind != "overmind", a.born))],
             "graveyard": list(reversed(self.graveyard[-30:])),

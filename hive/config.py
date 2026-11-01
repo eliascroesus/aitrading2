@@ -49,7 +49,7 @@ class Config:
     llm_concurrency: int = 4
 
     # --- when Claude is used ---
-    claude_mode: str = "economy"  # economy: Claude only for idea bursts, operator orders and prop-ready reviews; full: always on
+    claude_mode: str = "full"  # full: Claude always on; economy: only idea bursts, orders and reviews; off: free (no Claude)
     burst_after_min: float = 15.0  # minutes without improvement before an idea burst
     burst_cooldown_min: float = 20.0  # minimum minutes between idea bursts
     burst_rounds: int = 1  # rounds each drone thinks per burst
@@ -67,6 +67,7 @@ class Config:
     overmind_interval_sec: float = 150.0
     overmind_patience: int = 4
     workers: int = 2
+    prescreen: bool = True  # skip the challenge simulations for strategies that lose money on the train segment
     ga_batch: int = 48
 
     # --- challenge + markets ---
@@ -97,8 +98,8 @@ class Config:
 
     @property
     def offline(self) -> bool:
-        """True when no Anthropic key is configured: drones fall back to procedural generation."""
-        return not self.anthropic_api_key
+        """True when Claude will not be used at start: no Anthropic key, or HIVE_CLAUDE_MODE=off."""
+        return not self.anthropic_api_key or self.claude_mode == "off"
 
     @property
     def resolved_data_source(self) -> str:
@@ -126,7 +127,7 @@ def load_config() -> Config:
         llm_fallbacks=_bool("HIVE_LLM_FALLBACKS", True),
         llm_budget_usd=float(budget) if budget else None,
         llm_concurrency=_int("HIVE_LLM_CONCURRENCY", 4),
-        claude_mode=_env("HIVE_CLAUDE_MODE", "economy").lower(),
+        claude_mode=_env("HIVE_CLAUDE_MODE", "full").lower(),
         burst_after_min=_float("HIVE_BURST_AFTER_MIN", 15.0),
         burst_cooldown_min=_float("HIVE_BURST_COOLDOWN_MIN", 20.0),
         burst_rounds=_int("HIVE_BURST_ROUNDS", 1),
@@ -143,6 +144,7 @@ def load_config() -> Config:
         overmind_patience=_int("HIVE_OVERMIND_PATIENCE", 4),
         workers=_int("HIVE_WORKERS", max(1, cpu // 2)),  # half the cores keeps a laptop usable
         ga_batch=_int("HIVE_GA_BATCH", 48),
+        prescreen=_bool("HIVE_PRESCREEN", True),
         prop_preset=_env("PROP_PRESET", "topstep_50k"),
         instruments=[s.upper() for s in _list("INSTRUMENTS", "MNQ,MES,MGC,M6E,MBT")],
         timeframes=[int(x) for x in _list("TIMEFRAMES", "5,15")],
