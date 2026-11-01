@@ -142,15 +142,28 @@ Alpaca does not offer futures, so each strategy trades a proxy: QQQ for MNQ/NQ, 
 * `PAPER_SIZE_SCALE=0.1` trades a tenth of the size and rescales the challenge P&L.
 * `ALPACA_PAPER=true` is the default. Setting it to false sends real orders.
 
-## When Claude is used (economy mode, the default)
+## Claude / Economy / Free toggle
 
-The free genetic evolver does the searching on your CPU, thousands of strategies a minute. Claude is only called when it adds something:
+Switch at any time with the toggle at the top of the dashboard (your choice is remembered). `HIVE_CLAUDE_MODE` sets the starting mode.
 
-* **Idea bursts:** when the best score hasn't improved for `HIVE_BURST_AFTER_MIN` minutes (default 15), the Overmind makes a decision and every drone designs one round of new strategies, then they go back to sleep. At most one burst every `HIVE_BURST_COOLDOWN_MIN` minutes.
-* **Your orders:** an order from the command bar triggers a burst immediately.
-* **Prop-ready reviews:** when a strategy or combo meets every readiness rule on untouched data (robust, holdout pass within the target days ≥ 40%, at least 15 points above luck, validation and holdout within 15 points, ≥ 20 holdout trades), it gets a **PROP-READY** badge, and Claude audits it once. The audit covers plain-English rules, why it might work, risks, a paper-test checklist and tweaks, and appears in the strategy drawer.
+| Mode | What runs | Claude cost |
+|---|---|---|
+| **Claude** (default) | Claude Overmind and drones design strategies nonstop, alongside the evolver | tens of $ per hour on Opus |
+| **Economy** | The evolver searches; Claude only for idea bursts, your orders and prop-ready reviews | $0 while improving, at most ~$1.50/hour |
+| **Free** | No Claude at all; the self-tuning evolver and rule-based agents do everything | **$0** |
 
-Between bursts, Claude costs nothing. `HIVE_CLAUDE_MODE=full` brings back always-on drones (roughly 10–20× the cost).
+Without an `ANTHROPIC_API_KEY` the hive always runs in Free mode.
+
+**Economy details.** When the best score hasn't improved for `HIVE_BURST_AFTER_MIN` minutes (default 15), the Overmind makes a decision and every drone designs one round of new strategies, then they go back to sleep (at most one burst every `HIVE_BURST_COOLDOWN_MIN` minutes). An order from the command bar triggers a burst immediately.
+
+**Prop-ready reviews (Claude and Economy modes).** When a strategy or combo meets every readiness rule on untouched data, it gets a **PROP-READY** badge, in every mode. The rules: robust, holdout pass within the target days ≥ 40%, at least 15 points above luck, validation and holdout within 15 points, ≥ 20 holdout trades. With Claude available, it is also audited once. The audit covers plain-English rules, why it might work, risks, a paper-test checklist and tweaks, and appears in the strategy drawer.
+
+**The free engine** (used in every mode, and the only engine in Free mode):
+* **Pre-screen:** strategies that lose money or barely trade on the train data skip the challenge simulations. Most new strategies fall in this group, so each one costs about 30% less CPU on average.
+* **Self-tuning moves:** the evolver has five moves: mutate one setting, fine-tune every setting slightly, cross two strategies, transplant a new entry idea onto a proven strategy, and invent a brand-new one. It uses each in proportion to how often that move recently produced a child better than its parent. The current mix is shown under the Evolution chart.
+* **Robustness checks, per-market reserves, combos** and the research-based template library, as described above.
+
+**Speed toggle.** **Normal** uses half your CPU cores, so the computer stays usable. **Turbo** uses all but one, for the fastest search.
 
 ## Cost and speed
 

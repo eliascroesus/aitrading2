@@ -33,6 +33,15 @@
       <span id="model-chip" class="chip">—</span>
     </div>
     <div class="actions">
+      <div class="seg toggle" id="mode-toggle" title="How much Claude the hive uses">
+        <button data-mode="full" title="Claude agents always on">Claude</button>
+        <button data-mode="economy" title="Claude only for idea bursts, your orders and prop-ready reviews">Economy</button>
+        <button data-mode="off" title="No Claude at all: the free self-tuning evolver does everything ($0)">Free</button>
+      </div>
+      <div class="seg toggle" id="speed-toggle" title="CPU cores used for backtesting">
+        <button data-speed="normal" title="Half your CPU cores (computer stays usable)">Normal</button>
+        <button data-speed="turbo" title="All CPU cores but one (fastest search)">Turbo</button>
+      </div>
       <button id="pause-btn" class="btn">Pause</button>
     </div>
   </header>
@@ -84,6 +93,7 @@
         </div>
         <div class="chart-box"><canvas id="evo-chart"></canvas><div id="evo-tip" class="tip"></div></div>
         <div class="champion-strip" id="champion-strip"></div>
+        <div class="mix" id="evolver-mix"></div>
       </article>
 
       <article class="card span-4" id="hive-card">

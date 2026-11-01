@@ -57,6 +57,14 @@ if(r.ok){location.href='/';}else{document.getElementById('e').textContent='Wrong
 </script></body></html>"""
 
 
+class ModeIn(BaseModel):
+    mode: str
+
+
+class SpeedIn(BaseModel):
+    speed: str
+
+
 class SpawnIn(BaseModel):
     specialty: str
     mission: str
@@ -187,6 +195,22 @@ def create_app(cfg: Config) -> FastAPI:
         if c is None:
             raise HTTPException(404, "unknown combo")
         return c
+
+    @app.post("/api/mode")
+    async def api_mode(body: ModeIn):
+        try:
+            need_hive().set_mode(body.mode)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return {"ok": True}
+
+    @app.post("/api/speed")
+    async def api_speed(body: SpeedIn):
+        try:
+            need_hive().set_speed(body.speed)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return {"ok": True}
 
     @app.post("/api/pause")
     async def api_pause():

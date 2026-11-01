@@ -139,9 +139,17 @@ function renderHeader(d) {
   data.className = `chip ${src === "synthetic" ? "demo" : ""}`;
   data.title = (d.datasets || []).map((x) => `${x.instrument} ${x.timeframe}m via ${x.proxy}: ${x.days} days ${x.start}→${x.end}`).join("\n");
   const model = $("#model-chip");
-  model.textContent = d.mode.llm === "claude" ? `Claude · ${d.mode.overmind_model}` : "OFFLINE · procedural agents";
-  model.className = `chip ${d.mode.llm === "claude" ? "" : "demo"}`;
-  model.title = d.mode.llm === "claude" ? `Overmind: ${d.mode.overmind_model}\nDrones: ${d.mode.drone_model}` : "Set ANTHROPIC_API_KEY in .env to give the hive Claude agents";
+  model.textContent = d.mode.llm === "claude" ? `Claude · ${d.mode.overmind_model}` : "FREE MODE · no Claude · $0";
+  model.className = `chip ${d.mode.llm === "claude" ? "" : "free"}`;
+  model.title = d.mode.llm === "claude" ? `Overmind: ${d.mode.overmind_model}\nDrones: ${d.mode.drone_model}` : "The free self-tuning evolver and rule-based agents do everything";
+  const mode = d.stats.claude_mode;
+  $$("#mode-toggle button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.mode === mode);
+    const locked = b.dataset.mode !== "off" && !d.mode.claude_available;
+    b.disabled = locked;
+    if (locked) b.title = "Add ANTHROPIC_API_KEY to .env (and restart) to use Claude";
+  });
+  $$("#speed-toggle button").forEach((b) => b.classList.toggle("on", b.dataset.speed === d.mode.speed));
 }
 
 function renderKpis(d) {
@@ -174,12 +182,24 @@ function renderKpis(d) {
   if (d.mode.llm === "claude" && s.claude_mode === "economy") {
     mode = s.burst_active ? " · idea burst running" : ` · economy, burst after ${Math.max(0, s.burst_after_min - s.stalled_min).toFixed(0)}m more stall`;
   } else if (d.mode.llm === "claude") {
-    mode = " · full mode";
+    mode = " · Claude always on";
+  } else {
+    mode = " · free mode";
   }
   $("#k-calls").textContent = `${s.llm_calls} calls${s.budget ? ` · budget ${money(s.budget, 0)}` : ""}${mode}`;
 }
 
+const OP_LABELS = { mutate: "mutate", tune: "fine-tune", crossover: "crossover", transplant: "transplant", random: "new idea" };
+function renderMix(d) {
+  const mix = d.stats.evolver_mix;
+  if (!mix) return;
+  const parts = Object.entries(mix).sort((a, b) => b[1].weight - a[1].weight)
+    .map(([op, m]) => `<span title="${pct(m.hit_rate, 1)} of recent ${OP_LABELS[op] || op} children reached the top 50"><b>${OP_LABELS[op] || op}</b> ${pct(m.weight)}</span>`);
+  $("#evolver-mix").innerHTML = `<span class="muted">Evolver mix (self-tuning):</span> ${parts.join("")}`;
+}
+
 function renderChampion(d) {
+  renderMix(d);
   const el = $("#champion-strip");
   const top = d.leaders[0];
   if (!top) { el.innerHTML = `<span class="muted">Waiting for the first strategies…</span>`; return; }
@@ -703,6 +723,16 @@ function renderDrawer(rec) {
 
 // ---------------------------------------------------------------- events
 function bind() {
+  $("#mode-toggle").addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-mode]");
+    if (!b || b.disabled || b.classList.contains("on")) return;
+    try { await api("/api/mode", { mode: b.dataset.mode }); toast(`Mode: ${b.textContent}`); } catch (err) { toast(err.message, 4000); }
+  });
+  $("#speed-toggle").addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-speed]");
+    if (!b || b.classList.contains("on")) return;
+    try { await api("/api/speed", { speed: b.dataset.speed }); toast(`Speed: ${b.textContent}`); } catch (err) { toast(err.message, 4000); }
+  });
   $("#pause-btn").onclick = async () => {
     const running = state.snap?.status === "running";
     try { await api(running ? "/api/pause" : "/api/resume", {}); } catch (e) { toast(e.message); }

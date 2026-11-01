@@ -268,3 +268,18 @@ def test_forex_and_crypto_instruments_evaluate():
         results = [evaluator.evaluate(s.to_dict()) for s in seeds.seed_strategies([sym], [5])]
         assert all(r["ok"] for r in results), [r.get("error") for r in results if not r["ok"]]
         assert any(r["trades"] > 0 for r in results), sym
+
+
+def test_prescreen_skips_losing_strategies(ds):
+    evaluator.init_local({ds.key: ds}, propfirm.get_rules("topstep_50k"), {}, mc_sims=50)
+    # trades every bar with a tiny target and a wide stop: commissions make it lose on train
+    loser = {"name": "loser", "family": "other", "instrument": "MNQ", "timeframe": 5, "long_entry": "close > 0",
+             "stop_type": "atr", "stop_value": 6, "target_type": "points", "target_value": 0.25, "max_trades_per_day": 50,
+             "risk_usd": 200}
+    res = evaluator.evaluate(loser)
+    assert res["ok"] and res["screened"] and res["fitness"] < 0.01
+    for seg in ("train", "val", "test"):  # same shape as a full result
+        for key in ("pass_mc", "pass_fast", "luck_fast", "median_days", "profit_factor", "win_rate", "trades", "net"):
+            assert key in res[seg]
+    full = evaluator.evaluate(seeds.seed_strategies(["MNQ"], [5])[0].to_dict())
+    assert "screened" not in full or not full["screened"] or full["train"]["net"] <= 0

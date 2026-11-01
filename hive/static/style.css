@@ -368,3 +368,11 @@ table.board { width: 100%; border-collapse: collapse; font-size: 12px; }
 .review { border: 1px solid rgba(61, 220, 151, 0.25); background: rgba(61, 220, 151, 0.04); border-radius: 10px; padding: 12px 14px; }
 .rv-h { font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; margin: 10px 0 4px; }
 .rv-list { margin: 0; padding-left: 18px; color: #c7cdd7; font-size: 12.5px; display: flex; flex-direction: column; gap: 3px; }
+
+.chip.free { color: var(--green); border-color: rgba(61, 220, 151, 0.4); background: var(--green-bg); }
+.seg.toggle button { padding: 6px 11px; font-size: 12px; font-weight: 500; }
+.seg.toggle button.on { background: var(--amber); color: #1b1305; }
+.seg.toggle button:disabled { opacity: 0.35; cursor: not-allowed; }
+.mix { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11.5px; color: var(--muted); align-items: center; }
+.mix span b { color: var(--text); font-weight: 500; margin-right: 3px; }
+@media (max-width: 720px) { .actions { flex-wrap: wrap; } }

@@ -23,10 +23,14 @@ _ENGINES: dict[str, lang.Engine] = {}
 _RULES: propfirm.PropRules | None = None
 _RATIOS: dict[str, float] = {}
 _MC_SIMS = 400
+SCREEN = True
+SCREEN_MIN_TRADES = 10  # pre-screen: strategies with fewer train trades or a losing train segment skip the simulations
 
 
-def init_worker(dataset_files: dict[str, str], rules: dict, ratios: dict[str, float], mc_sims: int = 400) -> None:
-    global _RULES, _RATIOS, _MC_SIMS
+def init_worker(dataset_files: dict[str, str], rules: dict, ratios: dict[str, float], mc_sims: int = 400,
+                screen: bool = True) -> None:
+    global _RULES, _RATIOS, _MC_SIMS, SCREEN
+    SCREEN = screen
     for key, path in dataset_files.items():
         with open(path, "rb") as fh:
             _DATASETS[key] = pickle.load(fh)
@@ -96,6 +100,29 @@ def _seg_metrics(tr: backtest.Trades, day_rec: dict, d0: int, d1: int, rules: pr
         "timeout": mc["timeout"],
         "median_days": mc["median_days"],
         "hist_median_days": hist["median_days"],
+    }
+
+
+def _screened_result(uid: str, spec: StrategySpec, ds: Dataset, trades: backtest.Trades) -> dict:
+    """Cheap result for strategies that lose money (or barely trade) on the train segment: no Monte Carlo needed.
+    Same shape as a full result so every consumer can read it."""
+    seg_keys = ("pass_mc", "pass_fast", "pass_hist", "luck", "luck_fast", "fail_maxloss", "fail_dll", "timeout", "win_rate",
+                "profit_factor", "avg_r", "max_dd", "sharpe", "worst_day", "best_day")
+    out = {}
+    for name in ("train", "val", "test"):
+        d0, d1 = ds.splits[name]
+        mask = (trades.day >= d0) & (trades.day < d1)
+        pnl = trades.pnl[mask]
+        out[name] = {**{k: 0.0 for k in seg_keys}, "days": int(d1 - d0), "trades": int(mask.sum()), "net": float(pnl.sum()),
+                     "expectancy": float(pnl.mean()) if len(pnl) else 0.0, "trade_days": 0, "median_days": None,
+                     "hist_median_days": None}
+    exp = out["train"]["expectancy"] + out["val"]["expectancy"]
+    return {
+        "ok": True, "uid": uid, "screened": True, "fitness": float(max(0.0, 0.002 * math.tanh(exp / 200.0))),
+        "folds": [0.0, 0.0, 0.0], "conditions": complexity(spec), "fast_days": _RULES.fast_days, **out,
+        "trades": int(len(trades)), "long_share": float((trades.side > 0).mean()) if len(trades) else 0.0,
+        "avg_qty": float(trades.qty.mean()) if len(trades) else 0.0, "avg_hold_bars": 0.0, "exit_reasons": {},
+        "split_ts": [None, None],
     }
 
 
@@ -270,6 +297,10 @@ def evaluate(spec_dict: dict) -> dict:
             return {"ok": False, "uid": uid, "error": f"no data loaded for {spec.instrument} {spec.timeframe}m (available: {', '.join(sorted(_DATASETS))})"}
         rules = _RULES
         ds, trades, day_rec = _backtest_spec(spec)
+        d0, d1 = ds.splits["train"]
+        in_train = (trades.day >= d0) & (trades.day < d1)
+        if SCREEN and (in_train.sum() < SCREEN_MIN_TRADES or trades.pnl[in_train].sum() <= 0):
+            return _screened_result(uid, spec, ds, trades)
         rng = np.random.default_rng(zlib.crc32(uid.encode()))
         segs = {name: _seg_metrics(trades, day_rec, *_segment_days(ds, name), rules, rng) for name in ("train", "val", "test")}
         d0, d1 = ds.splits["train"]

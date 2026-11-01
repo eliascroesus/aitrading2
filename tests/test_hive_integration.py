@@ -91,3 +91,36 @@ def test_prop_ready_candidates_get_one_review(tmp_path, monkeypatch):
     assert any("PROP-READY" in e["msg"] for e in events)
     assert reviews and all(r["verdict"] == "needs_work" for r in reviews.values())
     assert CALLS["review"] == len(reviews)  # never reviews the same candidate twice
+
+
+def test_free_toggle_stops_all_claude_calls(tmp_path, monkeypatch):
+    monkeypatch.setattr(llm_mod.LLM, "json_call", _fake_json_call)
+    for k in CALLS:
+        CALLS[k] = 0
+    cfg = Config(anthropic_api_key="sk-test", workers=2, ga_batch=12, history_days=150, data_source="synthetic",
+                 instruments=["MNQ", "MES"], timeframes=[5], data_dir=tmp_path, overmind_interval_sec=3,
+                 drone_cooldown_sec=0.2, max_drones=2, claude_mode="full")
+
+    async def scenario():
+        instruments = {s: get_instrument(s) for s in cfg.instruments}
+        datasets, files = load_datasets(cfg, instruments)
+        store = Store(tmp_path / "hive.db")
+        hive = Hive(cfg, get_rules("topstep_50k"), instruments, datasets, files, store, Bus(store))
+        hive.loop_interval = 1.0
+        await hive.start()
+        await asyncio.sleep(6)
+        hive.set_mode("off")
+        await asyncio.sleep(3)  # let in-flight calls finish
+        after_switch = sum(CALLS.values())
+        await asyncio.sleep(8)
+        snap = hive.snapshot()
+        mix = hive._op_weights()
+        await hive.stop()
+        return after_switch, snap, mix, Store(tmp_path / "hive.db").kv_get("claude_mode")
+
+    after_switch, snap, mix, saved = asyncio.run(scenario())
+    assert sum(CALLS.values()) == after_switch  # not a single Claude call in free mode
+    assert snap["mode"]["llm"] == "free" and snap["stats"]["claude_mode"] == "off" and saved == "off"
+    assert snap["stats"]["tested"] > 50
+    assert abs(sum(mix.values()) - 1.0) < 1e-9 and set(mix) == {"mutate", "tune", "crossover", "transplant", "random"}
+    assert set(snap["stats"]["evolver_mix"]) == set(mix)
